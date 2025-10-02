@@ -527,27 +527,32 @@ class ImageWatermarkTool(QMainWindow):
                     break
                     
     def pil_to_qimage(self, pil_image):
-        """将PIL Image转换为QImage"""
-        # 不需要交换RGB通道，因为QImage可以直接处理正确的RGB格式
-        # 保留原始颜色通道顺序以确保颜色显示一致
-        data = pil_image.tobytes("raw", pil_image.mode)
+        """将PIL Image转换为QImage，确保颜色显示一致"""
+        # 确保图像模式正确
+        if pil_image.mode != "RGBA":
+            pil_image = pil_image.convert("RGBA")
         
-        # 根据图像模式选择正确的QImage格式
-        if pil_image.mode == "RGB":
-            format = QImage.Format_RGB888
-        elif pil_image.mode == "RGBA":
-            format = QImage.Format_RGBA8888
-        else:
-            # 将其他模式转换为RGB
-            pil_image = pil_image.convert("RGB")
-            data = pil_image.tobytes("raw", "RGB")
-            format = QImage.Format_RGB888
-            
-        q_image = QImage(data, pil_image.size[0], pil_image.size[1], pil_image.size[0] * len(pil_image.mode), format)
+        # 获取图像数据
+        width, height = pil_image.size
         
-        # 确保RGB图像在Qt中正确显示
-        if pil_image.mode == "RGB" or pil_image.mode == "RGBA":
-            q_image = q_image.rgbSwapped()
+        # PIL的RGBA格式是RGBA，但QImage需要的是BGRA
+        # 创建一个新的字节数组存储BGRA数据
+        bgra_data = bytearray(width * height * 4)
+        pixels = pil_image.load()
+        
+        for y in range(height):
+            for x in range(width):
+                r, g, b, a = pixels[x, y]
+                index = (y * width + x) * 4
+                bgra_data[index] = b  # 蓝色
+                bgra_data[index + 1] = g  # 绿色
+                bgra_data[index + 2] = r  # 红色
+                bgra_data[index + 3] = a  # 透明度
+        
+        # 创建QImage，使用Format_RGBA8888格式确保颜色通道正确
+        q_image = QImage(bgra_data, width, height, width * 4, QImage.Format_RGBA8888)
+        
+        # 不需要rgbSwapped，因为我们已经手动调整了颜色通道顺序
         return q_image
         
     def get_system_fonts(self):
@@ -583,32 +588,90 @@ class ImageWatermarkTool(QMainWindow):
         try:
             # 尝试使用选择的字体
             font_path = self.watermark_font
+            found = False
             # 检查是否有完整路径，如果没有则尝试在系统字体中查找
             if not os.path.isfile(font_path):
-                # 尝试添加扩展名
-                if not any(ext in font_path.lower() for ext in ['.ttf', '.ttc', '.otf']):
-                    found = False
-                    # 尝试各种可能的字体文件扩展名和变体
-                    for ext in ['.ttf', '.ttc', '.otf']:
-                        # 尝试直接匹配
-                        if f"{font_path}{ext}" in self.system_fonts:
-                            font_path = f"{font_path}{ext}"
-                            found = True
-                            break
-                        # 尝试在系统字体中查找包含字体名称的文件
-                        for system_font in self.system_fonts:
-                            if font_path.lower() in system_font.lower() and ext in system_font.lower():
-                                font_path = system_font
+                # 先尝试在系统字体目录中直接查找
+                system_font_dir = r'C:\Windows\Fonts'
+                if os.path.exists(system_font_dir):
+                    # 对于常见字体如Times、Calibri，先尝试直接匹配文件名
+                    font_variants = [
+                        font_path,
+                        font_path.lower(),
+                        font_path.replace(' ', '')
+                    ]
+                    
+                    # 尝试添加扩展名
+                    for base_name in font_variants:
+                        for ext in ['.ttf', '.ttc', '.otf']:
+                            candidate = os.path.join(system_font_dir, base_name + ext)
+                            if os.path.isfile(candidate):
+                                font_path = candidate
                                 found = True
                                 break
                         if found:
                             break
-                
-                # 如果字体在系统字体列表中，尝试构建完整路径
-                if not os.path.isfile(font_path):
-                    font_path = os.path.join(r'C:\Windows\Fonts', font_path)
-                
-            font = ImageFont.truetype(font_path, self.watermark_font_size)
+                    
+                    # 如果没找到，尝试查找包含字体名称的文件
+                    if not found:
+                        for system_font in self.system_fonts:
+                            font_name = os.path.splitext(system_font)[0].lower()
+                            if font_path.lower() in font_name:
+                                font_path = os.path.join(system_font_dir, system_font)
+                                found = True
+                                break
+            
+            # 尝试加载带有粗体和斜体样式的字体
+            # 先尝试获取字体的基本名称
+            font_base_name = os.path.splitext(os.path.basename(font_path))[0]
+            system_font_dir = r'C:\Windows\Fonts'
+            
+            # 构建可能的字体变体名称
+            font_variants = []
+            if self.watermark_bold and self.watermark_italic:
+                # 粗斜体
+                font_variants.extend([
+                    f"{font_base_name} Bold Italic",
+                    f"{font_base_name} BoldIt",
+                    f"{font_base_name} BI",
+                    f"{font_base_name}-BoldItalic",
+                    f"{font_base_name}BdIt",
+                ])
+            elif self.watermark_bold:
+                # 粗体
+                font_variants.extend([
+                    f"{font_base_name} Bold",
+                    f"{font_base_name} Bold",
+                    f"{font_base_name}-Bold",
+                    f"{font_base_name}Bd",
+                ])
+            elif self.watermark_italic:
+                # 斜体
+                font_variants.extend([
+                    f"{font_base_name} Italic",
+                    f"{font_base_name} Italic",
+                    f"{font_base_name}-Italic",
+                    f"{font_base_name}It",
+                ])
+            
+            # 尝试加载有样式的字体
+            styled_font = None
+            if font_variants and os.path.exists(system_font_dir):
+                for variant in font_variants:
+                    for ext in ['.ttf', '.ttc', '.otf']:
+                        variant_path = os.path.join(system_font_dir, variant + ext)
+                        if os.path.isfile(variant_path):
+                            try:
+                                styled_font = ImageFont.truetype(variant_path, self.watermark_font_size)
+                                break
+                            except:
+                                continue
+                    if styled_font:
+                        break
+            
+            # 如果找不到有样式的字体，则使用原始字体
+            font = styled_font if styled_font else ImageFont.truetype(font_path, self.watermark_font_size)
+            
         except (IOError, OSError):
             # 尝试使用更通用的字体加载方法
             try:
