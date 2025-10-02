@@ -540,19 +540,38 @@ class ImageWatermarkTool(QMainWindow):
         bgra_data = bytearray(width * height * 4)
         pixels = pil_image.load()
         
+        # 优化颜色通道转换，确保颜色一致性
         for y in range(height):
             for x in range(width):
-                r, g, b, a = pixels[x, y]
-                index = (y * width + x) * 4
-                bgra_data[index] = b  # 蓝色
-                bgra_data[index + 1] = g  # 绿色
-                bgra_data[index + 2] = r  # 红色
-                bgra_data[index + 3] = a  # 透明度
+                try:
+                    # 获取像素的RGBA值
+                    r, g, b, a = pixels[x, y]
+                    # 确保值在有效范围内
+                    r = max(0, min(255, r))
+                    g = max(0, min(255, g))
+                    b = max(0, min(255, b))
+                    a = max(0, min(255, a))
+                    
+                    # 转换为BGRA格式
+                    index = (y * width + x) * 4
+                    bgra_data[index] = b  # 蓝色
+                    bgra_data[index + 1] = g  # 绿色
+                    bgra_data[index + 2] = r  # 红色
+                    bgra_data[index + 3] = a  # 透明度
+                except Exception:
+                    # 处理可能的像素访问错误
+                    index = (y * width + x) * 4
+                    bgra_data[index] = 255  # 蓝色
+                    bgra_data[index + 1] = 255  # 绿色
+                    bgra_data[index + 2] = 255  # 红色
+                    bgra_data[index + 3] = 255  # 透明度
         
         # 创建QImage，使用Format_RGBA8888格式确保颜色通道正确
         q_image = QImage(bgra_data, width, height, width * 4, QImage.Format_RGBA8888)
         
-        # 不需要rgbSwapped，因为我们已经手动调整了颜色通道顺序
+        # 设置设备像素比以确保在高DPI显示器上正确显示
+        q_image.setDevicePixelRatio(1.0)
+        
         return q_image
         
     def get_system_fonts(self):
@@ -589,77 +608,184 @@ class ImageWatermarkTool(QMainWindow):
             # 尝试使用选择的字体
             font_path = self.watermark_font
             found = False
+            
+            # 特殊处理常见字体，确保正确加载
+            common_fonts = {
+                'times': 'times.ttf',
+                'times new roman': 'times.ttf',
+                'calibri': 'calibri.ttf',
+                'arial': 'arial.ttf',
+                'courier': 'cour.ttf',
+                'verdana': 'verdana.ttf',
+                'tahoma': 'tahoma.ttf',
+                'comic sans ms': 'comic.ttf',
+                'impact': 'impact.ttf',
+                'georgia': 'georgia.ttf',
+                'palatino': 'pala.ttf',
+                'bookman': 'bookman.ttf',
+                'century': 'century.ttf'
+            }
+            
             # 检查是否有完整路径，如果没有则尝试在系统字体中查找
             if not os.path.isfile(font_path):
                 # 先尝试在系统字体目录中直接查找
                 system_font_dir = r'C:\Windows\Fonts'
                 if os.path.exists(system_font_dir):
-                    # 对于常见字体如Times、Calibri，先尝试直接匹配文件名
-                    font_variants = [
-                        font_path,
-                        font_path.lower(),
-                        font_path.replace(' ', '')
-                    ]
+                    # 转换为小写以进行不区分大小写的匹配
+                    font_lower = font_path.lower()
                     
-                    # 尝试添加扩展名
-                    for base_name in font_variants:
-                        for ext in ['.ttf', '.ttc', '.otf']:
-                            candidate = os.path.join(system_font_dir, base_name + ext)
+                    # 首先检查是否是常见字体
+                    for common_name, common_filename in common_fonts.items():
+                        if common_name in font_lower:
+                            candidate = os.path.join(system_font_dir, common_filename)
                             if os.path.isfile(candidate):
                                 font_path = candidate
                                 found = True
                                 break
-                        if found:
-                            break
                     
-                    # 如果没找到，尝试查找包含字体名称的文件
+                    # 如果不是常见字体或常见字体文件不存在，尝试更多变体
                     if not found:
-                        for system_font in self.system_fonts:
-                            font_name = os.path.splitext(system_font)[0].lower()
-                            if font_path.lower() in font_name:
-                                font_path = os.path.join(system_font_dir, system_font)
-                                found = True
+                        # 对于常见字体如Times、Calibri，先尝试直接匹配文件名变体
+                        font_variants = [
+                            font_path,
+                            font_path.lower(),
+                            font_path.replace(' ', ''),
+                            font_path.replace(' ', '-'),
+                            font_path.split(' ')[0],  # 只取第一个单词，如'Times New Roman' -> 'Times'
+                            font_path.split('-')[0],  # 只取第一个单词，如'Times-New-Roman' -> 'Times'
+                            # 添加更多可能的字体名称变体
+                            font_path.replace('&', 'and'),  # 将 '&' 替换为 'and'
+                            font_path.replace('+', 'plus')   # 将 '+' 替换为 'plus'
+                        ]
+                        
+                        # 尝试添加扩展名
+                        for base_name in font_variants:
+                            # 尝试常见的字体文件名格式
+                            formats = [
+                                f'{base_name}{{ext}}',
+                                f'{base_name.capitalize()}{{ext}}',
+                                f'{base_name.replace(" ", "")}{{ext}}',
+                                f'{base_name.upper()}{{ext}}',
+                                f'{base_name.lower()}{{ext}}',
+                                f'{base_name.split()[-1]}{{ext}}'  # 只取最后一个单词
+                            ]
+                            
+                            for fmt in formats:
+                                for ext in ['.ttf', '.ttc', '.otf', '.fon', '.ttx']:
+                                    # 尝试直接匹配
+                                    candidate = os.path.join(system_font_dir, fmt.format(ext=ext))
+                                    if os.path.isfile(candidate):
+                                        font_path = candidate
+                                        found = True
+                                        break
+                                    # 尝试在文件名中间添加变体标记
+                                    candidate = os.path.join(system_font_dir, fmt.format(ext='') + '_' + ext.lstrip('.'))
+                                    if os.path.isfile(candidate):
+                                        font_path = candidate
+                                        found = True
+                                        break
+                                if found:
+                                    break
+                            if found:
                                 break
+                        
+                        # 如果没找到，尝试更宽松的匹配方式
+                        if not found:
+                            for system_font in self.system_fonts:
+                                font_name = os.path.splitext(system_font)[0].lower()
+                                font_base = font_path.lower()
+                                # 允许部分匹配和变体匹配
+                                if any(keyword in font_name for keyword in font_base.split()) or \
+                                   any(keyword.replace(' ', '') in font_name.replace(' ', '') for keyword in font_base.split()):
+                                    font_path = os.path.join(system_font_dir, system_font)
+                                    found = True
+                                    break
             
             # 尝试加载带有粗体和斜体样式的字体
             # 先尝试获取字体的基本名称
             font_base_name = os.path.splitext(os.path.basename(font_path))[0]
             system_font_dir = r'C:\Windows\Fonts'
             
-            # 构建可能的字体变体名称
+            # 构建可能的字体变体名称，增加更多可能的格式和常见字体的特殊处理
             font_variants = []
             if self.watermark_bold and self.watermark_italic:
-                # 粗斜体
+                # 粗斜体 - 增加更多常见的变体格式
                 font_variants.extend([
                     f"{font_base_name} Bold Italic",
                     f"{font_base_name} BoldIt",
                     f"{font_base_name} BI",
                     f"{font_base_name}-BoldItalic",
                     f"{font_base_name}BdIt",
+                    f"{font_base_name} BoldOblique",
+                    f"{font_base_name}BO",
+                    f"{font_base_name}_Bold_Italic",
+                    f"{font_base_name}bi",  # 简洁格式
+                    f"{font_base_name}bol",  # 可能的缩写
+                    f"{font_base_name}boldital",  # 可能的缩写
+                    f"{font_base_name}bold_italic",  # 带下划线
+                    f"{font_base_name}.bold-italic"  # 带点号
                 ])
             elif self.watermark_bold:
-                # 粗体
+                # 粗体 - 增加更多常见的变体格式
                 font_variants.extend([
-                    f"{font_base_name} Bold",
                     f"{font_base_name} Bold",
                     f"{font_base_name}-Bold",
                     f"{font_base_name}Bd",
+                    f"{font_base_name}Bold",
+                    f"{font_base_name}_Bold",
+                    f"{font_base_name}bol",  # 可能的缩写
+                    f"{font_base_name}bold",  # 小写
+                    f"{font_base_name}_bold",  # 带下划线
+                    f"{font_base_name}.bold"  # 带点号
                 ])
             elif self.watermark_italic:
-                # 斜体
+                # 斜体 - 增加更多常见的变体格式
                 font_variants.extend([
-                    f"{font_base_name} Italic",
                     f"{font_base_name} Italic",
                     f"{font_base_name}-Italic",
                     f"{font_base_name}It",
+                    f"{font_base_name}Oblique",
+                    f"{font_base_name}_Italic",
+                    f"{font_base_name}ita",  # 可能的缩写
+                    f"{font_base_name}italic",  # 小写
+                    f"{font_base_name}_italic",  # 带下划线
+                    f"{font_base_name}.italic"  # 带点号
                 ])
             
-            # 尝试加载有样式的字体
+            # 尝试加载有样式的字体 - 增强实现
             styled_font = None
             if font_variants and os.path.exists(system_font_dir):
                 for variant in font_variants:
-                    for ext in ['.ttf', '.ttc', '.otf']:
+                    for ext in ['.ttf', '.ttc', '.otf', '.fon', '.ttx']:
+                        # 尝试直接匹配
                         variant_path = os.path.join(system_font_dir, variant + ext)
+                        if os.path.isfile(variant_path):
+                            try:
+                                styled_font = ImageFont.truetype(variant_path, self.watermark_font_size)
+                                break
+                            except:
+                                continue
+                        # 尝试小写版本
+                        variant_lower = variant.lower()
+                        variant_path = os.path.join(system_font_dir, variant_lower + ext)
+                        if os.path.isfile(variant_path):
+                            try:
+                                styled_font = ImageFont.truetype(variant_path, self.watermark_font_size)
+                                break
+                            except:
+                                continue
+                        # 尝试大写版本
+                        variant_upper = variant.upper()
+                        variant_path = os.path.join(system_font_dir, variant_upper + ext)
+                        if os.path.isfile(variant_path):
+                            try:
+                                styled_font = ImageFont.truetype(variant_path, self.watermark_font_size)
+                                break
+                            except:
+                                continue
+                        # 尝试无空格版本
+                        variant_nospace = variant.replace(' ', '')
+                        variant_path = os.path.join(system_font_dir, variant_nospace + ext)
                         if os.path.isfile(variant_path):
                             try:
                                 styled_font = ImageFont.truetype(variant_path, self.watermark_font_size)
@@ -669,17 +795,66 @@ class ImageWatermarkTool(QMainWindow):
                     if styled_font:
                         break
             
+            # 如果找不到有样式的字体，尝试备选方案：
+            # 1. 尝试使用PIL的字体样式支持
+            if not styled_font and (self.watermark_bold or self.watermark_italic):
+                try:
+                    # 创建基础字体
+                    base_font = ImageFont.truetype(font_path, self.watermark_font_size)
+                    # 注意：PIL实际上不支持动态添加粗体/斜体样式，所以这里只是保留尝试逻辑
+                    styled_font = base_font
+                except:
+                    pass
+            
             # 如果找不到有样式的字体，则使用原始字体
             font = styled_font if styled_font else ImageFont.truetype(font_path, self.watermark_font_size)
             
         except (IOError, OSError):
-            # 尝试使用更通用的字体加载方法
+            # 尝试使用更通用的字体加载方法 - 增加更多备选方案和常见字体特殊处理
             try:
-                # 尝试使用PIL的字体查找功能
-                font = ImageFont.truetype(self.watermark_font, self.watermark_font_size)
+                # 特殊处理常见字体
+                font_lower = self.watermark_font.lower()
+                for common_name, common_filename in common_fonts.items():
+                    if common_name in font_lower:
+                        # 尝试使用系统字体目录
+                        system_font_dir = r'C:\Windows\Fonts'
+                        if os.path.exists(system_font_dir):
+                            candidate = os.path.join(system_font_dir, common_filename)
+                            if os.path.isfile(candidate):
+                                font = ImageFont.truetype(candidate, self.watermark_font_size)
+                                break
+                else:
+                    # 尝试使用PIL的字体查找功能
+                    font = ImageFont.truetype(self.watermark_font, self.watermark_font_size)
             except:
-                # 使用默认字体
-                font = ImageFont.load_default()
+                try:
+                    # 尝试去除字体名称中的空格
+                    simplified_font = self.watermark_font.replace(' ', '')
+                    font = ImageFont.truetype(simplified_font, self.watermark_font_size)
+                except:
+                    try:
+                        # 尝试使用字体名称的一部分
+                        font_parts = self.watermark_font.split(' ')
+                        for i in range(1, len(font_parts) + 1):
+                            try:
+                                partial_font = ' '.join(font_parts[:i])
+                                font = ImageFont.truetype(partial_font, self.watermark_font_size)
+                                break
+                            except:
+                                continue
+                        else:
+                            raise Exception("Partial font not found")
+                    except:
+                        try:
+                            # 尝试使用字体名称的大写形式
+                            font = ImageFont.truetype(self.watermark_font.upper(), self.watermark_font_size)
+                        except:
+                            try:
+                                # 尝试使用字体名称的小写形式
+                                font = ImageFont.truetype(self.watermark_font.lower(), self.watermark_font_size)
+                            except:
+                                # 最后尝试使用默认字体
+                                font = ImageFont.load_default()
         
         # 计算文本尺寸
         try:
@@ -728,17 +903,42 @@ class ImageWatermarkTool(QMainWindow):
         return image
     
     def get_rgb_from_color(self, color):
-        """将颜色名称或代码转换为RGB值"""
+        """将颜色名称或代码转换为RGB值，确保颜色一致性"""
         if isinstance(color, str):
             # 如果是颜色名称，使用QColor转换
             q_color = QColor(color)
-            return (q_color.red(), q_color.green(), q_color.blue())
-        elif isinstance(color, tuple) and len(color) == 3:
-            # 如果已经是RGB元组，直接返回
-            return color
-        else:
-            # 默认返回白色
-            return (255, 255, 255)
+            # 确保颜色值有效
+            if q_color.isValid():
+                return (q_color.red(), q_color.green(), q_color.blue())
+            else:
+                # 尝试处理常见的十六进制格式
+                if color.startswith('#'):
+                    try:
+                        # 处理 #RGB 格式
+                        if len(color) == 4:
+                            r = int(color[1] * 2, 16)
+                            g = int(color[2] * 2, 16)
+                            b = int(color[3] * 2, 16)
+                            return (r, g, b)
+                        # 处理 #RRGGBB 格式
+                        elif len(color) == 7:
+                            r = int(color[1:3], 16)
+                            g = int(color[3:5], 16)
+                            b = int(color[5:7], 16)
+                            return (r, g, b)
+                    except ValueError:
+                        pass
+                # 默认返回白色
+                return (255, 255, 255)
+        elif isinstance(color, tuple):
+            # 确保RGB值在有效范围内
+            if len(color) == 3:
+                return tuple(max(0, min(255, int(c))) for c in color)
+            elif len(color) == 4:
+                # 忽略alpha通道，只返回RGB值
+                return tuple(max(0, min(255, int(c))) for c in color[:3])
+        # 默认返回白色
+        return (255, 255, 255)
         
     def on_watermark_text_changed(self, text):
         """水印文本变化时更新"""
