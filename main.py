@@ -3,7 +3,8 @@ import os
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QListWidget, QListWidgetItem, QFileDialog, 
-    QSplitter, QFrame, QGroupBox, QFormLayout, QAction, qApp, QMessageBox
+    QSplitter, QFrame, QGroupBox, QFormLayout, QAction, qApp, QMessageBox,
+    QLineEdit, QGridLayout, QComboBox, QSlider
 )
 from PyQt5.QtGui import QPixmap, QImage, QFont, QIcon
 from PyQt5.QtCore import Qt, QSize, QPoint
@@ -15,6 +16,26 @@ class ImageWatermarkTool(QMainWindow):
         self.init_ui()
         self.image_list = []  # 存储导入的图片路径
         self.current_image_index = -1  # 当前选中的图片索引
+        
+        # 水印相关变量
+        self.watermark_text = ""
+        self.watermark_position = (0.5, 0.5)  # 默认居中位置（相对坐标）
+        self.watermark_font_size = 30
+        self.watermark_color = "white"
+        self.watermark_opacity = 128  # 0-255，默认为半透明
+        
+        # 水印预设位置（九宫格）
+        self.position_presets = {
+            '左上': (0.1, 0.1),
+            '上中': (0.5, 0.1),
+            '右上': (0.9, 0.1),
+            '左中': (0.1, 0.5),
+            '居中': (0.5, 0.5),
+            '右中': (0.9, 0.5),
+            '左下': (0.1, 0.9),
+            '下中': (0.5, 0.9),
+            '右下': (0.9, 0.9)
+        }
         
     def init_ui(self):
         # 设置窗口标题和大小
@@ -132,14 +153,57 @@ class ImageWatermarkTool(QMainWindow):
         file_group.setLayout(file_layout)
         right_layout.addWidget(file_group)
         
-        # 水印设置组（第二阶段实现）
+        # 水印设置组
         watermark_group = QGroupBox('水印设置')
         watermark_layout = QFormLayout()
         
-        # 占位符，第二阶段实现
-        placeholder = QLabel('此功能将在第二阶段实现')
-        placeholder.setAlignment(Qt.AlignCenter)
-        watermark_layout.addRow(placeholder)
+        # 文本输入
+        self.watermark_input = QLineEdit()
+        self.watermark_input.setPlaceholderText('请输入水印文本')
+        self.watermark_input.textChanged.connect(self.on_watermark_text_changed)
+        watermark_layout.addRow('水印文本:', self.watermark_input)
+        
+        # 字体大小
+        self.font_size_combo = QComboBox()
+        self.font_size_combo.addItems([str(i) for i in range(10, 71, 5)])
+        self.font_size_combo.setCurrentText(str(self.watermark_font_size))
+        self.font_size_combo.currentTextChanged.connect(self.on_font_size_changed)
+        watermark_layout.addRow('字体大小:', self.font_size_combo)
+        
+        # 透明度调节
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setRange(0, 255)
+        self.opacity_slider.setValue(self.watermark_opacity)
+        self.opacity_slider.setTickPosition(QSlider.TicksBelow)
+        self.opacity_slider.setTickInterval(51)
+        self.opacity_slider.valueChanged.connect(self.on_opacity_changed)
+        watermark_layout.addRow('透明度:', self.opacity_slider)
+        
+        # 预设位置选择
+        position_group = QGroupBox('预设位置')
+        position_layout = QGridLayout()
+        
+        # 创建九宫格位置按钮
+        positions = list(self.position_presets.keys())
+        grid_positions = [(0,0), (0,1), (0,2),
+                          (1,0), (1,1), (1,2),
+                          (2,0), (2,1), (2,2)]
+        
+        self.position_buttons = {}
+        for pos_text, (row, col) in zip(positions, grid_positions):
+            button = QPushButton(pos_text)
+            button.setFixedSize(50, 30)
+            button.clicked.connect(lambda checked, p=pos_text: self.set_watermark_position(p))
+            self.position_buttons[pos_text] = button
+            position_layout.addWidget(button, row, col)
+        
+        position_group.setLayout(position_layout)
+        watermark_layout.addRow(position_group)
+        
+        # 添加应用水印按钮
+        self.apply_watermark_button = QPushButton('应用水印')
+        self.apply_watermark_button.clicked.connect(self.apply_watermark_to_preview)
+        watermark_layout.addRow(self.apply_watermark_button)
         
         watermark_group.setLayout(watermark_layout)
         right_layout.addWidget(watermark_group)
@@ -217,7 +281,16 @@ class ImageWatermarkTool(QMainWindow):
             current_image_path = self.image_list[self.current_image_index]
             
             # 加载图片
-            pixmap = QPixmap(current_image_path)
+            image = Image.open(current_image_path)
+            
+            # 如果有水印文本，应用水印
+            if self.watermark_text:
+                image = self.add_watermark_to_image(image)
+            
+            # 转换为QPixmap用于显示
+            q_image = self.pil_to_qimage(image)
+            pixmap = QPixmap.fromImage(q_image)
+            
             if not pixmap.isNull():
                 # 调整图片大小以适应预览窗口
                 preview_size = self.preview_label.size()
@@ -228,6 +301,116 @@ class ImageWatermarkTool(QMainWindow):
                 
                 # 更新预览标签
                 self.preview_label.setPixmap(scaled_pixmap)
+                
+                # 启用导出按钮
+                self.export_button.setEnabled(True)
+                for action in self.menuBar().actions():
+                    if action.text() == '文件':
+                        for sub_action in action.menu().actions():
+                            if sub_action.text() == '导出图片':
+                                sub_action.setEnabled(True)
+                                break
+                        break
+            else:
+                # 显示错误信息
+                self.preview_label.setText('无法加载图片')
+        else:
+            self.preview_label.setText('请导入图片')
+            self.export_button.setEnabled(False)
+            for action in self.menuBar().actions():
+                if action.text() == '文件':
+                    for sub_action in action.menu().actions():
+                        if sub_action.text() == '导出图片':
+                            sub_action.setEnabled(False)
+                            break
+                    break
+                    
+    def pil_to_qimage(self, pil_image):
+        """将PIL Image转换为QImage"""
+        if pil_image.mode == "RGB":
+            r, g, b = pil_image.split()
+            pil_image = Image.merge("RGB", (b, g, r))
+        elif pil_image.mode == "RGBA":
+            r, g, b, a = pil_image.split()
+            pil_image = Image.merge("RGBA", (b, g, r, a))
+        
+        data = pil_image.tobytes("raw", pil_image.mode)
+        q_image = QImage(data, pil_image.size[0], pil_image.size[1], pil_image.size[0] * len(pil_image.mode),
+                        QImage.Format_RGB888 if pil_image.mode == "RGB" else QImage.Format_RGBA8888)
+        return q_image
+        
+    def add_watermark_to_image(self, image):
+        """向图片添加文本水印"""
+        # 创建可绘制对象
+        draw = ImageDraw.Draw(image, 'RGBA')
+        
+        # 获取图片尺寸
+        width, height = image.size
+        
+        # 尝试加载字体，失败则使用默认字体
+        try:
+            # 尝试使用系统字体
+            font = ImageFont.truetype("simhei.ttf", self.watermark_font_size)
+        except IOError:
+            # 使用默认字体
+            font = ImageFont.load_default()
+        
+        # 计算文本尺寸
+        try:
+            text_width, text_height = draw.textsize(self.watermark_text, font=font)
+        except:
+            # 兼容Pillow 9.0+的API变化
+            bbox = draw.textbbox((0, 0), self.watermark_text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        
+        # 计算水印位置
+        pos_x = int(self.watermark_position[0] * width - text_width / 2)
+        pos_y = int(self.watermark_position[1] * height - text_height / 2)
+        
+        # 确保位置在图片范围内
+        pos_x = max(0, min(pos_x, width - text_width))
+        pos_y = max(0, min(pos_y, height - text_height))
+        
+        # 添加水印文本，带透明度
+        draw.text((pos_x, pos_y), self.watermark_text, fill=(255, 255, 255, self.watermark_opacity), font=font)
+        
+        return image
+        
+    def on_watermark_text_changed(self, text):
+        """水印文本变化时更新"""
+        self.watermark_text = text
+        self.update_preview()
+        
+    def on_font_size_changed(self, size_str):
+        """字体大小变化时更新"""
+        try:
+            self.watermark_font_size = int(size_str)
+            self.update_preview()
+        except ValueError:
+            pass
+        
+    def on_opacity_changed(self, value):
+        """透明度变化时更新"""
+        self.watermark_opacity = value
+        self.update_preview()
+        
+    def set_watermark_position(self, position_name):
+        """设置水印预设位置"""
+        if position_name in self.position_presets:
+            self.watermark_position = self.position_presets[position_name]
+            self.update_preview()
+            
+            # 高亮选中的位置按钮
+            for name, button in self.position_buttons.items():
+                if name == position_name:
+                    button.setStyleSheet("background-color: #4CAF50; color: white;")
+                else:
+                    button.setStyleSheet("")
+        
+    def apply_watermark_to_preview(self):
+        """应用水印到预览"""
+        self.update_preview()
     
     def export_image(self):
         # 此功能将在第三阶段实现
