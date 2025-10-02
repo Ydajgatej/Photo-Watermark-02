@@ -1,10 +1,11 @@
 import sys
 import os
+import json
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QListWidget, QListWidgetItem, QFileDialog, 
     QSplitter, QFrame, QGroupBox, QFormLayout, QAction, qApp, QMessageBox,
-    QLineEdit, QGridLayout, QComboBox, QSlider, QCheckBox, QRadioButton, QButtonGroup
+    QLineEdit, QGridLayout, QComboBox, QSlider, QCheckBox, QRadioButton, QButtonGroup, QInputDialog
 )
 from PyQt5.QtGui import QPixmap, QImage, QFont, QIcon
 from PyQt5.QtCore import Qt, QSize, QPoint
@@ -22,6 +23,11 @@ class ImageWatermarkTool(QMainWindow):
         self.watermark_font_size = 30
         self.watermark_color = "white"
         self.watermark_opacity = 128  # 0-255，默认为半透明
+        
+        # 模板相关变量
+        self.templates_dir = os.path.join(os.path.expanduser("~"), ".photo_watermark_templates")
+        self.settings_file = os.path.join(self.templates_dir, "last_settings.json")
+        self.load_last_settings()
         
         # 水印预设位置（九宫格）
         self.position_presets = {
@@ -166,6 +172,19 @@ class ImageWatermarkTool(QMainWindow):
         # 水印设置组
         watermark_group = QGroupBox('水印设置')
         watermark_layout = QFormLayout()
+        
+        # 模板管理按钮
+        template_layout = QHBoxLayout()
+        save_template_btn = QPushButton("保存模板")
+        save_template_btn.clicked.connect(self.save_template)
+        load_template_btn = QPushButton("加载模板")
+        load_template_btn.clicked.connect(self.load_template)
+        manage_templates_btn = QPushButton("管理模板")
+        manage_templates_btn.clicked.connect(self.manage_templates)
+        template_layout.addWidget(save_template_btn)
+        template_layout.addWidget(load_template_btn)
+        template_layout.addWidget(manage_templates_btn)
+        watermark_layout.addRow(template_layout)
         
         # 文本输入
         self.watermark_input = QLineEdit()
@@ -538,11 +557,13 @@ class ImageWatermarkTool(QMainWindow):
     def on_suffix_text_changed(self, text):
         """后缀文本变化时更新"""
         self.suffix_text = text
-    
+        self.save_current_settings()
+        
     def on_save_dir_toggled(self, state):
         """保存目录选项变化时更新"""
         old_state = self.save_to_same_dir
         self.save_to_same_dir = (state == Qt.Checked)
+        self.save_current_settings()
         
         # 如果用户选择保存到原目录，显示警告
         if self.save_to_same_dir and not old_state:
@@ -557,6 +578,7 @@ class ImageWatermarkTool(QMainWindow):
             if reply == QMessageBox.No:
                 self.save_same_dir_checkbox.setChecked(False)
                 self.save_to_same_dir = False
+                self.save_current_settings()
     
     def generate_output_filename(self, original_path):
         """生成输出文件名"""
@@ -649,6 +671,350 @@ class ImageWatermarkTool(QMainWindow):
         super().resizeEvent(event)
         if 0 <= self.current_image_index < len(self.image_list):
             self.update_preview()
+            
+    def save_current_settings(self):
+        """保存当前设置到文件"""
+        try:
+            # 确保模板目录存在
+            os.makedirs(self.templates_dir, exist_ok=True)
+            
+            # 准备设置数据
+            settings = {
+                "watermark_text": self.watermark_text,
+                "watermark_position": self.watermark_position,
+                "watermark_font_size": self.watermark_font_size,
+                "watermark_opacity": self.watermark_opacity,
+                "export_format": self.export_format,
+                "export_quality": self.export_quality,
+                "use_suffix": self.use_suffix,
+                "suffix_text": self.suffix_text,
+                "save_to_same_dir": self.save_to_same_dir,
+                "last_export_dir": self.last_export_dir
+            }
+            
+            # 保存到文件
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存设置时出错: {e}")
+            
+    def load_last_settings(self):
+        """加载上次保存的设置"""
+        try:
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                    
+                # 恢复设置
+                if "watermark_text" in settings:
+                    self.watermark_text = settings["watermark_text"]
+                    if hasattr(self, 'watermark_input'):
+                        self.watermark_input.setText(self.watermark_text)
+                
+                if "watermark_position" in settings:
+                    self.watermark_position = tuple(settings["watermark_position"])
+                
+                if "watermark_font_size" in settings:
+                    self.watermark_font_size = settings["watermark_font_size"]
+                    if hasattr(self, 'font_size_combo'):
+                        size_str = str(self.watermark_font_size)
+                        index = self.font_size_combo.findText(size_str)
+                        if index >= 0:
+                            self.font_size_combo.setCurrentIndex(index)
+                
+                if "watermark_opacity" in settings:
+                    self.watermark_opacity = settings["watermark_opacity"]
+                    if hasattr(self, 'opacity_slider'):
+                        self.opacity_slider.setValue(self.watermark_opacity)
+                
+                if "export_format" in settings:
+                    self.export_format = settings["export_format"]
+                    if hasattr(self, 'jpeg_radio') and hasattr(self, 'png_radio'):
+                        if self.export_format == "JPEG":
+                            self.jpeg_radio.setChecked(True)
+                        else:
+                            self.png_radio.setChecked(True)
+                
+                if "export_quality" in settings:
+                    self.export_quality = settings["export_quality"]
+                    if hasattr(self, 'quality_slider') and hasattr(self, 'quality_label'):
+                        self.quality_slider.setValue(self.export_quality)
+                        self.quality_label.setText(f'{self.export_quality}%')
+                
+                if "use_suffix" in settings:
+                    self.use_suffix = settings["use_suffix"]
+                    if hasattr(self, 'suffix_checkbox'):
+                        self.suffix_checkbox.setChecked(self.use_suffix)
+                
+                if "suffix_text" in settings:
+                    self.suffix_text = settings["suffix_text"]
+                    if hasattr(self, 'suffix_edit'):
+                        self.suffix_edit.setText(self.suffix_text)
+                
+                if "save_to_same_dir" in settings:
+                    self.save_to_same_dir = settings["save_to_same_dir"]
+                    if hasattr(self, 'save_same_dir_checkbox'):
+                        self.save_same_dir_checkbox.setChecked(self.save_to_same_dir)
+                
+                if "last_export_dir" in settings:
+                    self.last_export_dir = settings["last_export_dir"]
+        except Exception as e:
+            print(f"加载设置时出错: {e}")
+            # 如果加载失败，使用默认设置
+            pass
+            
+    def save_template(self):
+        """保存当前设置为模板"""
+        try:
+            # 确保模板目录存在
+            os.makedirs(self.templates_dir, exist_ok=True)
+            
+            # 获取模板名称
+            template_name, ok = QInputDialog.getText(self, "保存模板", "请输入模板名称:")
+            
+            if ok and template_name.strip():
+                # 准备模板数据
+                template = {
+                    "name": template_name,
+                    "watermark_text": self.watermark_text,
+                    "watermark_position": self.watermark_position,
+                    "watermark_font_size": self.watermark_font_size,
+                    "watermark_opacity": self.watermark_opacity,
+                    "export_format": self.export_format,
+                    "export_quality": self.export_quality,
+                    "use_suffix": self.use_suffix,
+                    "suffix_text": self.suffix_text,
+                    "save_to_same_dir": self.save_to_same_dir
+                }
+                
+                # 生成模板文件名
+                template_filename = f"template_{template_name.replace(' ', '_')}.json"
+                template_path = os.path.join(self.templates_dir, template_filename)
+                
+                # 保存模板
+                with open(template_path, 'w', encoding='utf-8') as f:
+                    json.dump(template, f, ensure_ascii=False, indent=2)
+                
+                QMessageBox.information(self, "成功", f"模板 '{template_name}' 已保存")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"保存模板时出错: {str(e)}")
+            
+    def load_template(self):
+        """加载已保存的模板"""
+        try:
+            # 确保模板目录存在
+            os.makedirs(self.templates_dir, exist_ok=True)
+            
+            # 获取所有模板文件
+            template_files = []
+            for file in os.listdir(self.templates_dir):
+                if file.startswith("template_") and file.endswith(".json"):
+                    template_files.append(file)
+            
+            if not template_files:
+                QMessageBox.information(self, "提示", "没有找到已保存的模板")
+                return
+            
+            # 显示模板选择对话框
+            template_names = []
+            template_paths = []
+            for file in template_files:
+                try:
+                    template_path = os.path.join(self.templates_dir, file)
+                    with open(template_path, 'r', encoding='utf-8') as f:
+                        template = json.load(f)
+                        if "name" in template:
+                            template_names.append(template["name"])
+                            template_paths.append(template_path)
+                except:
+                    continue
+            
+            if not template_names:
+                QMessageBox.information(self, "提示", "没有有效的模板文件")
+                return
+            
+            selected_name, ok = QInputDialog.getItem(
+                self, "选择模板", "请选择要加载的模板:", template_names, 0, False
+            )
+            
+            if ok and selected_name:
+                # 查找选中的模板文件
+                index = template_names.index(selected_name)
+                template_path = template_paths[index]
+                
+                # 加载模板
+                with open(template_path, 'r', encoding='utf-8') as f:
+                    template = json.load(f)
+                
+                # 应用模板设置
+                if "watermark_text" in template:
+                    self.watermark_text = template["watermark_text"]
+                    self.watermark_input.setText(self.watermark_text)
+                
+                if "watermark_position" in template:
+                    self.watermark_position = tuple(template["watermark_position"])
+                    # 更新位置按钮状态
+                    for name, position in self.position_presets.items():
+                        if position == self.watermark_position:
+                            self.set_watermark_position(name)
+                            break
+                
+                if "watermark_font_size" in template:
+                    self.watermark_font_size = template["watermark_font_size"]
+                    size_str = str(self.watermark_font_size)
+                    index = self.font_size_combo.findText(size_str)
+                    if index >= 0:
+                        self.font_size_combo.setCurrentIndex(index)
+                
+                if "watermark_opacity" in template:
+                    self.watermark_opacity = template["watermark_opacity"]
+                    self.opacity_slider.setValue(self.watermark_opacity)
+                
+                if "export_format" in template:
+                    self.export_format = template["export_format"]
+                    if self.export_format == "JPEG":
+                        self.jpeg_radio.setChecked(True)
+                    else:
+                        self.png_radio.setChecked(True)
+                
+                if "export_quality" in template:
+                    self.export_quality = template["export_quality"]
+                    self.quality_slider.setValue(self.export_quality)
+                    self.quality_label.setText(f'{self.export_quality}%')
+                
+                if "use_suffix" in template:
+                    self.use_suffix = template["use_suffix"]
+                    self.suffix_checkbox.setChecked(self.use_suffix)
+                
+                if "suffix_text" in template:
+                    self.suffix_text = template["suffix_text"]
+                    self.suffix_edit.setText(self.suffix_text)
+                
+                if "save_to_same_dir" in template:
+                    self.save_to_same_dir = template["save_to_same_dir"]
+                    self.save_same_dir_checkbox.setChecked(self.save_to_same_dir)
+                
+                # 更新预览
+                self.update_preview()
+                
+                # 保存当前设置
+                self.save_current_settings()
+                
+                QMessageBox.information(self, "成功", f"模板 '{selected_name}' 已加载")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"加载模板时出错: {str(e)}")
+            
+    def manage_templates(self):
+        """管理和删除已保存的模板"""
+        try:
+            # 确保模板目录存在
+            os.makedirs(self.templates_dir, exist_ok=True)
+            
+            # 获取所有模板文件
+            template_files = []
+            for file in os.listdir(self.templates_dir):
+                if file.startswith("template_") and file.endswith(".json"):
+                    template_files.append(file)
+            
+            if not template_files:
+                QMessageBox.information(self, "提示", "没有找到已保存的模板")
+                return
+            
+            # 显示模板选择对话框
+            template_names = []
+            template_paths = []
+            for file in template_files:
+                try:
+                    template_path = os.path.join(self.templates_dir, file)
+                    with open(template_path, 'r', encoding='utf-8') as f:
+                        template = json.load(f)
+                        if "name" in template:
+                            template_names.append(template["name"])
+                            template_paths.append(template_path)
+                except:
+                    continue
+            
+            if not template_names:
+                QMessageBox.information(self, "提示", "没有有效的模板文件")
+                return
+            
+            selected_name, ok = QInputDialog.getItem(
+                self, "管理模板", "请选择要管理的模板:", template_names, 0, False
+            )
+            
+            if ok and selected_name:
+                # 查找选中的模板文件
+                index = template_names.index(selected_name)
+                template_path = template_paths[index]
+                
+                # 显示管理选项
+                options = ["删除模板", "重命名模板", "查看模板详情"]
+                choice, ok = QInputDialog.getItem(
+                    self, "模板管理", "请选择操作:", options, 0, False
+                )
+                
+                if ok:
+                    if choice == "删除模板":
+                        reply = QMessageBox.question(
+                            self, "确认删除", f"确定要删除模板 '{selected_name}' 吗？",
+                            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                        )
+                        
+                        if reply == QMessageBox.Yes:
+                            os.remove(template_path)
+                            QMessageBox.information(self, "成功", f"模板 '{selected_name}' 已删除")
+                    elif choice == "重命名模板":
+                        new_name, ok = QInputDialog.getText(
+                            self, "重命名模板", "请输入新的模板名称:", text=selected_name
+                        )
+                        
+                        if ok and new_name.strip() and new_name != selected_name:
+                            # 读取原模板内容
+                            with open(template_path, 'r', encoding='utf-8') as f:
+                                template = json.load(f)
+                            
+                            # 更新模板名称
+                            template["name"] = new_name
+                            
+                            # 删除原文件
+                            os.remove(template_path)
+                            
+                            # 保存新模板
+                            new_filename = f"template_{new_name.replace(' ', '_')}.json"
+                            new_path = os.path.join(self.templates_dir, new_filename)
+                            
+                            with open(new_path, 'w', encoding='utf-8') as f:
+                                json.dump(template, f, ensure_ascii=False, indent=2)
+                            
+                            QMessageBox.information(self, "成功", f"模板已重命名为 '{new_name}'")
+                    elif choice == "查看模板详情":
+                        # 读取模板内容
+                        with open(template_path, 'r', encoding='utf-8') as f:
+                            template = json.load(f)
+                        
+                        # 格式化模板详情
+                        details = []
+                        details.append(f"模板名称: {template.get('name', '未知')}")
+                        details.append(f"水印文本: {template.get('watermark_text', '无')}")
+                        details.append(f"字体大小: {template.get('watermark_font_size', '默认')}")
+                        details.append(f"透明度: {template.get('watermark_opacity', 128)}")
+                        details.append(f"导出格式: {template.get('export_format', 'JPEG')}")
+                        details.append(f"导出质量: {template.get('export_quality', 90)}%")
+                        details.append(f"使用后缀: {'是' if template.get('use_suffix', False) else '否'}")
+                        if template.get('use_suffix', False):
+                            details.append(f"后缀文本: {template.get('suffix_text', '')}")
+                        details.append(f"保存到原目录: {'是' if template.get('save_to_same_dir', False) else '否'}")
+                        
+                        QMessageBox.information(
+                            self, "模板详情", "\n".join(details)
+                        )
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"管理模板时出错: {str(e)}")
+            
+# 重写closeEvent方法，确保关闭时保存设置
+    def closeEvent(self, event):
+        self.save_current_settings()
+        event.accept()
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
