@@ -13,7 +13,6 @@ from PIL import Image, ImageQt, ImageDraw, ImageFont
 class ImageWatermarkTool(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.init_ui()
         self.image_list = []  # 存储导入的图片路径
         self.current_image_index = -1  # 当前选中的图片索引
         
@@ -44,6 +43,9 @@ class ImageWatermarkTool(QMainWindow):
         self.suffix_text = "_watermark"  # 默认后缀文本
         self.save_to_same_dir = False  # 默认不保存到原目录
         self.last_export_dir = os.path.expanduser("~")  # 上次导出目录
+        
+        # 初始化UI
+        self.init_ui()
         
     def init_ui(self):
         # 设置窗口标题和大小
