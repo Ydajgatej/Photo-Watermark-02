@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QListWidget, QListWidgetItem, QFileDialog, 
     QSplitter, QFrame, QGroupBox, QFormLayout, QAction, qApp, QMessageBox,
-    QLineEdit, QGridLayout, QComboBox, QSlider
+    QLineEdit, QGridLayout, QComboBox, QSlider, QCheckBox, QRadioButton, QButtonGroup
 )
 from PyQt5.QtGui import QPixmap, QImage, QFont, QIcon
 from PyQt5.QtCore import Qt, QSize, QPoint
@@ -36,6 +36,14 @@ class ImageWatermarkTool(QMainWindow):
             '下中': (0.5, 0.9),
             '右下': (0.9, 0.9)
         }
+        
+        # 导出相关配置
+        self.export_format = "JPEG"  # 默认导出格式
+        self.export_quality = 95  # 默认导出质量
+        self.use_suffix = True  # 默认使用后缀
+        self.suffix_text = "_watermark"  # 默认后缀文本
+        self.save_to_same_dir = False  # 默认不保存到原目录
+        self.last_export_dir = os.path.expanduser("~")  # 上次导出目录
         
     def init_ui(self):
         # 设置窗口标题和大小
@@ -207,6 +215,71 @@ class ImageWatermarkTool(QMainWindow):
         
         watermark_group.setLayout(watermark_layout)
         right_layout.addWidget(watermark_group)
+        
+        # 导出设置组
+        export_group = QGroupBox('导出设置')
+        export_layout = QFormLayout()
+        
+        # 导出格式选择
+        self.format_group = QButtonGroup()
+        self.jpeg_radio = QRadioButton('JPEG')
+        self.png_radio = QRadioButton('PNG')
+        self.format_group.addButton(self.jpeg_radio)
+        self.format_group.addButton(self.png_radio)
+        self.jpeg_radio.setChecked(True)
+        self.jpeg_radio.toggled.connect(self.on_format_changed)
+        self.png_radio.toggled.connect(self.on_format_changed)
+        
+        format_layout = QHBoxLayout()
+        format_layout.addWidget(self.jpeg_radio)
+        format_layout.addWidget(self.png_radio)
+        export_layout.addRow('导出格式:', format_layout)
+        
+        # 导出质量滑块
+        self.quality_slider = QSlider(Qt.Horizontal)
+        self.quality_slider.setRange(1, 100)
+        self.quality_slider.setValue(self.export_quality)
+        self.quality_slider.setTickPosition(QSlider.TicksBelow)
+        self.quality_slider.setTickInterval(20)
+        self.quality_slider.valueChanged.connect(self.on_quality_changed)
+        export_layout.addRow('导出质量:', self.quality_slider)
+        
+        # 导出质量显示
+        self.quality_label = QLabel(f'{self.export_quality}%')
+        export_layout.addRow('', self.quality_label)
+        
+        # 使用后缀复选框
+        self.suffix_checkbox = QCheckBox('添加后缀')
+        self.suffix_checkbox.setChecked(self.use_suffix)
+        self.suffix_checkbox.stateChanged.connect(self.on_suffix_toggled)
+        export_layout.addRow('', self.suffix_checkbox)
+        
+        # 后缀文本输入
+        self.suffix_edit = QLineEdit(self.suffix_text)
+        self.suffix_edit.textChanged.connect(self.on_suffix_text_changed)
+        self.suffix_edit.setEnabled(self.use_suffix)
+        export_layout.addRow('后缀文本:', self.suffix_edit)
+        
+        # 保存到原目录复选框（默认禁用，有警告提示）
+        self.save_same_dir_checkbox = QCheckBox('保存到原目录')
+        self.save_same_dir_checkbox.setChecked(self.save_to_same_dir)
+        self.save_same_dir_checkbox.stateChanged.connect(self.on_save_dir_toggled)
+        export_layout.addRow('', self.save_same_dir_checkbox)
+        
+        # 警告提示
+        warning_label = QLabel('<font color="red">警告：保存到原目录可能会覆盖原图</font>')
+        warning_label.setWordWrap(True)
+        export_layout.addRow('', warning_label)
+        
+        export_group.setLayout(export_layout)
+        right_layout.addWidget(export_group)
+        
+        # 连接导出设置控件的信号到槽函数
+        self.format_group.buttonClicked.connect(self.on_format_changed)
+        self.quality_slider.valueChanged.connect(self.on_quality_changed)
+        self.suffix_checkbox.stateChanged.connect(self.on_suffix_toggled)
+        self.suffix_edit.textChanged.connect(self.on_suffix_text_changed)
+        self.save_same_dir_checkbox.stateChanged.connect(self.on_save_dir_toggled)
         
         # 填充空间
         right_layout.addStretch()
@@ -411,10 +484,120 @@ class ImageWatermarkTool(QMainWindow):
     def apply_watermark_to_preview(self):
         """应用水印到预览"""
         self.update_preview()
+        
+    def on_format_changed(self):
+        """导出格式变化时更新"""
+        if self.jpeg_radio.isChecked():
+            self.export_format = "JPEG"
+        elif self.png_radio.isChecked():
+            self.export_format = "PNG"
+    
+    def on_quality_changed(self, value):
+        """导出质量变化时更新"""
+        self.export_quality = value
+        self.quality_label.setText(f'{value}%')
+    
+    def on_suffix_toggled(self, state):
+        """是否使用后缀变化时更新"""
+        self.use_suffix = (state == Qt.Checked)
+        self.suffix_edit.setEnabled(self.use_suffix)
+    
+    def on_suffix_text_changed(self, text):
+        """后缀文本变化时更新"""
+        self.suffix_text = text
+    
+    def on_save_dir_toggled(self, state):
+        """保存目录选项变化时更新"""
+        old_state = self.save_to_same_dir
+        self.save_to_same_dir = (state == Qt.Checked)
+        
+        # 如果用户选择保存到原目录，显示警告
+        if self.save_to_same_dir and not old_state:
+            reply = QMessageBox.warning(
+                self, 
+                '警告', 
+                '保存到原目录可能会覆盖原图，是否继续？',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.No:
+                self.save_same_dir_checkbox.setChecked(False)
+                self.save_to_same_dir = False
+    
+    def generate_output_filename(self, original_path):
+        """生成输出文件名"""
+        dir_path, file_name = os.path.split(original_path)
+        base_name, ext = os.path.splitext(file_name)
+        
+        # 如果使用后缀，添加后缀
+        if self.use_suffix:
+            output_name = f"{base_name}{self.suffix_text}"
+        else:
+            output_name = base_name
+        
+        # 根据导出格式设置扩展名
+        if self.export_format == "JPEG":
+            output_ext = ".jpg"
+        else:
+            output_ext = ".png"
+        
+        # 根据保存选项确定保存目录
+        if self.save_to_same_dir:
+            save_dir = dir_path
+        else:
+            save_dir = self.last_export_dir
+        
+        return os.path.join(save_dir, output_name + output_ext)
     
     def export_image(self):
-        # 此功能将在第三阶段实现
-        QMessageBox.information(self, '提示', '导出功能将在第三阶段实现')
+        """导出图片功能"""
+        if self.current_image_index < 0 or not self.image_list:
+            QMessageBox.warning(self, '错误', '请先导入图片')
+            return
+        
+        try:
+            # 获取当前图片路径
+            current_image_path = self.image_list[self.current_image_index]
+            
+            # 生成默认保存路径
+            default_save_path = self.generate_output_filename(current_image_path)
+            
+            # 打开文件保存对话框
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, 
+                '保存图片', 
+                default_save_path,
+                'JPEG文件 (*.jpg);;PNG文件 (*.png);;所有文件 (*)'
+            )
+            
+            if file_path:
+                # 更新上次导出目录
+                self.last_export_dir = os.path.dirname(file_path)
+                
+                # 加载原图
+                image = Image.open(current_image_path)
+                
+                # 应用水印
+                if self.watermark_text:
+                    image = self.add_watermark_to_image(image)
+                
+                # 保存图片
+                if self.export_format == "JPEG":
+                    # 确保图片模式兼容JPEG
+                    if image.mode == 'RGBA':
+                        background = Image.new('RGB', image.size, (255, 255, 255))
+                        background.paste(image, mask=image.split()[3])  # 3 is the alpha channel
+                        image = background
+                    image.save(file_path, 'JPEG', quality=self.export_quality)
+                else:
+                    image.save(file_path, 'PNG')
+                
+                # 显示成功消息
+                QMessageBox.information(self, '成功', f'图片已成功保存到：\n{file_path}')
+        except Exception as e:
+            # 显示错误消息
+            QMessageBox.critical(self, '错误', f'导出图片时出错：\n{str(e)}')
     
     def show_about(self):
         QMessageBox.about(self, '关于', '图片水印工具 v1.0\n\n一款用于为图片添加自定义文本水印的工具。')
