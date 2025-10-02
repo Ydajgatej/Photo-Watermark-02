@@ -290,10 +290,41 @@ class ImageWatermarkTool(QMainWindow):
         main_layout.addWidget(right_panel, 1)
     
     def import_images(self):
-        # 打开文件选择对话框
-        file_paths, _ = QFileDialog.getOpenFileNames(
-            self, '选择图片', '', '图片文件 (*.jpg *.jpeg *.png);;所有文件 (*)'
+        # 创建导入选择对话框
+        options = QFileDialog.Options()
+        options |= QFileDialog.ReadOnly
+        
+        # 显示选项对话框：选择文件还是文件夹
+        choice = QMessageBox.question(
+            self, '导入选项', 
+            '请选择导入方式：\n\n' 
+            '• 选择文件 - 可以选择多个图片文件\n' 
+            '• 选择文件夹 - 导入整个文件夹中的所有图片',
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+            QMessageBox.Yes
         )
+        
+        if choice == QMessageBox.Cancel:
+            return
+        
+        file_paths = []
+        
+        if choice == QMessageBox.Yes:  # 选择文件
+            file_paths, _ = QFileDialog.getOpenFileNames(
+                self, '选择图片', '', '图片文件 (*.jpg *.jpeg *.png);;所有文件 (*)'
+            )
+        else:  # 选择文件夹
+            dir_path = QFileDialog.getExistingDirectory(
+                self, '选择文件夹', '', options
+            )
+            
+            if dir_path:
+                # 遍历文件夹中的所有图片文件
+                for root, _, files in os.walk(dir_path):
+                    for file in files:
+                        ext = os.path.splitext(file)[1].lower()
+                        if ext in ['.jpg', '.jpeg', '.png']:
+                            file_paths.append(os.path.join(root, file))
         
         if file_paths:
             self.add_images(file_paths)
