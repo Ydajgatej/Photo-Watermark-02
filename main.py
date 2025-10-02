@@ -5,11 +5,12 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QListWidget, QListWidgetItem, QFileDialog, 
     QSplitter, QFrame, QGroupBox, QFormLayout, QAction, qApp, QMessageBox,
-    QLineEdit, QGridLayout, QComboBox, QSlider, QCheckBox, QRadioButton, QButtonGroup, QInputDialog
+    QLineEdit, QGridLayout, QComboBox, QSlider, QCheckBox, QRadioButton, QButtonGroup, QInputDialog, QColorDialog
 )
-from PyQt5.QtGui import QPixmap, QImage, QFont, QIcon
+from PyQt5.QtGui import QPixmap, QImage, QFont, QIcon, QColor
 from PyQt5.QtCore import Qt, QSize, QPoint
 from PIL import Image, ImageQt, ImageDraw, ImageFont
+import glob
 
 class ImageWatermarkTool(QMainWindow):
     def __init__(self):
@@ -23,10 +24,18 @@ class ImageWatermarkTool(QMainWindow):
         self.watermark_font_size = 30
         self.watermark_color = "white"
         self.watermark_opacity = 128  # 0-255，默认为半透明
+        self.watermark_font = "simhei.ttf"  # 默认字体
+        self.watermark_bold = False  # 粗体
+        self.watermark_italic = False  # 斜体
+        self.watermark_shadow = False  # 阴影
+        self.watermark_stroke = False  # 描边
+        self.watermark_stroke_width = 1  # 描边宽度
+        self.watermark_stroke_color = "black"  # 描边颜色
         
         # 模板相关变量
         self.templates_dir = os.path.join(os.path.expanduser("~"), ".photo_watermark_templates")
         self.settings_file = os.path.join(self.templates_dir, "last_settings.json")
+        self.system_fonts = self.get_system_fonts()  # 获取系统字体列表
         self.load_last_settings()
         
         # 水印预设位置（九宫格）
@@ -237,6 +246,73 @@ class ImageWatermarkTool(QMainWindow):
         watermark_group.setLayout(watermark_layout)
         right_layout.addWidget(watermark_group)
         
+        # 字体选择
+        font_layout = QHBoxLayout()
+        self.font_combo = QComboBox()
+        # 添加一些常用字体
+        common_fonts = ["simhei.ttf", "simsun.ttc", "msyh.ttc", "Arial.ttf", "Times.ttf", "Calibri.ttf"]
+        self.font_combo.addItems([os.path.splitext(font)[0] for font in common_fonts])
+        self.font_combo.setCurrentText("simhei")
+        self.font_combo.currentTextChanged.connect(self.on_font_changed)
+        font_layout.addWidget(self.font_combo)
+        watermark_layout.addRow('字体:', font_layout)
+
+        # 样式设置
+        style_layout = QHBoxLayout()
+        self.bold_checkbox = QCheckBox('粗体')
+        self.bold_checkbox.stateChanged.connect(self.on_bold_toggled)
+        self.italic_checkbox = QCheckBox('斜体')
+        self.italic_checkbox.stateChanged.connect(self.on_italic_toggled)
+        style_layout.addWidget(self.bold_checkbox)
+        style_layout.addWidget(self.italic_checkbox)
+        watermark_layout.addRow('字体样式:', style_layout)
+
+        # 颜色选择
+        color_layout = QHBoxLayout()
+        self.color_button = QPushButton('选择颜色')
+        self.color_button.setStyleSheet(f"background-color: {self.watermark_color}")
+        self.color_button.clicked.connect(self.choose_color)
+        self.color_label = QLabel('白色')
+        color_layout.addWidget(self.color_button)
+        color_layout.addWidget(self.color_label)
+        watermark_layout.addRow('字体颜色:', color_layout)
+
+        # 特效设置
+        effect_group = QGroupBox('文本特效')
+        effect_layout = QVBoxLayout()
+        
+        self.shadow_checkbox = QCheckBox('添加阴影')
+        self.shadow_checkbox.stateChanged.connect(self.on_shadow_toggled)
+        effect_layout.addWidget(self.shadow_checkbox)
+        
+        self.stroke_checkbox = QCheckBox('添加描边')
+        self.stroke_checkbox.stateChanged.connect(self.on_stroke_toggled)
+        effect_layout.addWidget(self.stroke_checkbox)
+        
+        stroke_width_layout = QHBoxLayout()
+        stroke_width_layout.addWidget(QLabel('描边宽度:'))
+        self.stroke_width_spin = QSlider(Qt.Horizontal)
+        self.stroke_width_spin.setRange(1, 5)
+        self.stroke_width_spin.setValue(self.watermark_stroke_width)
+        self.stroke_width_spin.valueChanged.connect(self.on_stroke_width_changed)
+        self.stroke_width_label = QLabel(str(self.watermark_stroke_width))
+        stroke_width_layout.addWidget(self.stroke_width_spin)
+        stroke_width_layout.addWidget(self.stroke_width_label)
+        effect_layout.addLayout(stroke_width_layout)
+        
+        stroke_color_layout = QHBoxLayout()
+        stroke_color_layout.addWidget(QLabel('描边颜色:'))
+        self.stroke_color_button = QPushButton('选择颜色')
+        self.stroke_color_button.setStyleSheet(f"background-color: {self.watermark_stroke_color}")
+        self.stroke_color_button.clicked.connect(self.choose_stroke_color)
+        self.stroke_color_label = QLabel('黑色')
+        stroke_color_layout.addWidget(self.stroke_color_button)
+        stroke_color_layout.addWidget(self.stroke_color_label)
+        effect_layout.addLayout(stroke_color_layout)
+        
+        effect_group.setLayout(effect_layout)
+        watermark_layout.addRow(effect_group)
+
         # 导出设置组
         export_group = QGroupBox('导出设置')
         export_layout = QFormLayout()
@@ -464,6 +540,27 @@ class ImageWatermarkTool(QMainWindow):
                         QImage.Format_RGB888 if pil_image.mode == "RGB" else QImage.Format_RGBA8888)
         return q_image
         
+    def get_system_fonts(self):
+        """获取系统已安装的字体列表"""
+        fonts = []
+        # 尝试从常见的字体目录获取字体
+        font_dirs = [
+            r'C:\Windows\Fonts',
+            r'/usr/share/fonts',
+            r'/Library/Fonts',
+            r'~/Library/Fonts'
+        ]
+        
+        for font_dir in font_dirs:
+            font_dir = os.path.expanduser(font_dir)
+            if os.path.exists(font_dir):
+                # 查找常见的字体文件
+                for ext in ['ttf', 'ttc', 'otf']:
+                    fonts.extend(glob.glob(os.path.join(font_dir, f'*.{ext}')))
+        
+        # 返回字体文件名列表
+        return [os.path.basename(font) for font in fonts]
+    
     def add_watermark_to_image(self, image):
         """向图片添加文本水印"""
         # 创建可绘制对象
@@ -474,20 +571,35 @@ class ImageWatermarkTool(QMainWindow):
         
         # 尝试加载字体，失败则使用默认字体
         try:
-            # 尝试使用系统字体
-            font = ImageFont.truetype("simhei.ttf", self.watermark_font_size)
+            # 尝试使用选择的字体
+            font_path = self.watermark_font
+            # 检查是否有完整路径，如果没有则尝试在系统字体中查找
+            if not os.path.isfile(font_path):
+                # 尝试添加扩展名
+                if not any(ext in font_path.lower() for ext in ['.ttf', '.ttc', '.otf']):
+                    for ext in ['.ttf', '.ttc', '.otf']:
+                        if f"{font_path}{ext}" in self.system_fonts:
+                            font_path = f"{font_path}{ext}"
+                            break
+                
+                # 如果字体在系统字体列表中，尝试构建完整路径
+                if font_path in self.system_fonts:
+                    font_path = os.path.join(r'C:\Windows\Fonts', font_path)
+                
+            font = ImageFont.truetype(font_path, self.watermark_font_size)
         except IOError:
             # 使用默认字体
             font = ImageFont.load_default()
         
         # 计算文本尺寸
         try:
-            text_width, text_height = draw.textsize(self.watermark_text, font=font)
-        except:
             # 兼容Pillow 9.0+的API变化
             bbox = draw.textbbox((0, 0), self.watermark_text, font=font)
             text_width = bbox[2] - bbox[0]
             text_height = bbox[3] - bbox[1]
+        except:
+            # 旧版Pillow
+            text_width, text_height = draw.textsize(self.watermark_text, font=font)
         
         # 计算水印位置
         pos_x = int(self.watermark_position[0] * width - text_width / 2)
@@ -497,10 +609,46 @@ class ImageWatermarkTool(QMainWindow):
         pos_x = max(0, min(pos_x, width - text_width))
         pos_y = max(0, min(pos_y, height - text_height))
         
-        # 添加水印文本，带透明度
-        draw.text((pos_x, pos_y), self.watermark_text, fill=(255, 255, 255, self.watermark_opacity), font=font)
+        # 将颜色名称转换为RGB值
+        color_rgb = self.get_rgb_from_color(self.watermark_color)
+        stroke_rgb = self.get_rgb_from_color(self.watermark_stroke_color)
+        
+        # 构建带透明度的颜色
+        fill_color = (*color_rgb, self.watermark_opacity)
+        
+        # 添加特效
+        if self.watermark_shadow:
+            # 添加阴影
+            shadow_offset = 2
+            shadow_color = (0, 0, 0, int(self.watermark_opacity * 0.5))
+            draw.text((pos_x + shadow_offset, pos_y + shadow_offset), self.watermark_text, 
+                      fill=shadow_color, font=font)
+        
+        if self.watermark_stroke:
+            # 添加描边
+            for x_offset in range(-self.watermark_stroke_width, self.watermark_stroke_width + 1):
+                for y_offset in range(-self.watermark_stroke_width, self.watermark_stroke_width + 1):
+                    if x_offset != 0 or y_offset != 0:
+                        draw.text((pos_x + x_offset, pos_y + y_offset), self.watermark_text, 
+                                  fill=(*stroke_rgb, self.watermark_opacity), font=font)
+        
+        # 添加水印文本
+        draw.text((pos_x, pos_y), self.watermark_text, fill=fill_color, font=font)
         
         return image
+    
+    def get_rgb_from_color(self, color):
+        """将颜色名称或代码转换为RGB值"""
+        if isinstance(color, str):
+            # 如果是颜色名称，使用QColor转换
+            q_color = QColor(color)
+            return (q_color.red(), q_color.green(), q_color.blue())
+        elif isinstance(color, tuple) and len(color) == 3:
+            # 如果已经是RGB元组，直接返回
+            return color
+        else:
+            # 默认返回白色
+            return (255, 255, 255)
         
     def on_watermark_text_changed(self, text):
         """水印文本变化时更新"""
@@ -512,6 +660,7 @@ class ImageWatermarkTool(QMainWindow):
         try:
             self.watermark_font_size = int(size_str)
             self.update_preview()
+            self.save_current_settings()
         except ValueError:
             pass
         
@@ -519,6 +668,64 @@ class ImageWatermarkTool(QMainWindow):
         """透明度变化时更新"""
         self.watermark_opacity = value
         self.update_preview()
+        self.save_current_settings()
+        
+    def on_font_changed(self, font_name):
+        """字体变化时更新"""
+        self.watermark_font = font_name
+        self.update_preview()
+        self.save_current_settings()
+        
+    def on_bold_toggled(self, state):
+        """粗体设置变化时更新"""
+        self.watermark_bold = (state == Qt.Checked)
+        self.update_preview()
+        self.save_current_settings()
+        
+    def on_italic_toggled(self, state):
+        """斜体设置变化时更新"""
+        self.watermark_italic = (state == Qt.Checked)
+        self.update_preview()
+        self.save_current_settings()
+        
+    def choose_color(self):
+        """选择字体颜色"""
+        color = QColorDialog.getColor(QColor(self.watermark_color), self, "选择字体颜色")
+        if color.isValid():
+            self.watermark_color = color.name()
+            self.color_button.setStyleSheet(f"background-color: {self.watermark_color}")
+            self.color_label.setText(color.name())
+            self.update_preview()
+            self.save_current_settings()
+            
+    def choose_stroke_color(self):
+        """选择描边颜色"""
+        color = QColorDialog.getColor(QColor(self.watermark_stroke_color), self, "选择描边颜色")
+        if color.isValid():
+            self.watermark_stroke_color = color.name()
+            self.stroke_color_button.setStyleSheet(f"background-color: {self.watermark_stroke_color}")
+            self.stroke_color_label.setText(color.name())
+            self.update_preview()
+            self.save_current_settings()
+            
+    def on_shadow_toggled(self, state):
+        """阴影设置变化时更新"""
+        self.watermark_shadow = (state == Qt.Checked)
+        self.update_preview()
+        self.save_current_settings()
+        
+    def on_stroke_toggled(self, state):
+        """描边设置变化时更新"""
+        self.watermark_stroke = (state == Qt.Checked)
+        self.update_preview()
+        self.save_current_settings()
+        
+    def on_stroke_width_changed(self, value):
+        """描边宽度变化时更新"""
+        self.watermark_stroke_width = value
+        self.stroke_width_label.setText(str(value))
+        self.update_preview()
+        self.save_current_settings()
         
     def set_watermark_position(self, position_name):
         """设置水印预设位置"""
@@ -684,6 +891,14 @@ class ImageWatermarkTool(QMainWindow):
                 "watermark_position": self.watermark_position,
                 "watermark_font_size": self.watermark_font_size,
                 "watermark_opacity": self.watermark_opacity,
+                "watermark_font": self.watermark_font,
+                "watermark_bold": self.watermark_bold,
+                "watermark_italic": self.watermark_italic,
+                "watermark_color": self.watermark_color,
+                "watermark_shadow": self.watermark_shadow,
+                "watermark_stroke": self.watermark_stroke,
+                "watermark_stroke_width": self.watermark_stroke_width,
+                "watermark_stroke_color": self.watermark_stroke_color,
                 "export_format": self.export_format,
                 "export_quality": self.export_quality,
                 "use_suffix": self.use_suffix,
@@ -726,6 +941,51 @@ class ImageWatermarkTool(QMainWindow):
                     self.watermark_opacity = settings["watermark_opacity"]
                     if hasattr(self, 'opacity_slider'):
                         self.opacity_slider.setValue(self.watermark_opacity)
+                        
+                if "watermark_font" in settings:
+                    self.watermark_font = settings["watermark_font"]
+                    if hasattr(self, 'font_combo'):
+                        index = self.font_combo.findText(self.watermark_font)
+                        if index >= 0:
+                            self.font_combo.setCurrentIndex(index)
+                
+                if "watermark_bold" in settings:
+                    self.watermark_bold = settings["watermark_bold"]
+                    if hasattr(self, 'bold_checkbox'):
+                        self.bold_checkbox.setChecked(self.watermark_bold)
+                
+                if "watermark_italic" in settings:
+                    self.watermark_italic = settings["watermark_italic"]
+                    if hasattr(self, 'italic_checkbox'):
+                        self.italic_checkbox.setChecked(self.watermark_italic)
+                
+                if "watermark_color" in settings:
+                    self.watermark_color = settings["watermark_color"]
+                    if hasattr(self, 'color_button') and hasattr(self, 'color_label'):
+                        self.color_button.setStyleSheet(f"background-color: {self.watermark_color}")
+                        self.color_label.setText(self.watermark_color)
+                
+                if "watermark_shadow" in settings:
+                    self.watermark_shadow = settings["watermark_shadow"]
+                    if hasattr(self, 'shadow_checkbox'):
+                        self.shadow_checkbox.setChecked(self.watermark_shadow)
+                
+                if "watermark_stroke" in settings:
+                    self.watermark_stroke = settings["watermark_stroke"]
+                    if hasattr(self, 'stroke_checkbox'):
+                        self.stroke_checkbox.setChecked(self.watermark_stroke)
+                
+                if "watermark_stroke_width" in settings:
+                    self.watermark_stroke_width = settings["watermark_stroke_width"]
+                    if hasattr(self, 'stroke_width_spin') and hasattr(self, 'stroke_width_label'):
+                        self.stroke_width_spin.setValue(self.watermark_stroke_width)
+                        self.stroke_width_label.setText(str(self.watermark_stroke_width))
+                
+                if "watermark_stroke_color" in settings:
+                    self.watermark_stroke_color = settings["watermark_stroke_color"]
+                    if hasattr(self, 'stroke_color_button') and hasattr(self, 'stroke_color_label'):
+                        self.stroke_color_button.setStyleSheet(f"background-color: {self.watermark_stroke_color}")
+                        self.stroke_color_label.setText(self.watermark_stroke_color)
                 
                 if "export_format" in settings:
                     self.export_format = settings["export_format"]
@@ -780,6 +1040,14 @@ class ImageWatermarkTool(QMainWindow):
                     "watermark_position": self.watermark_position,
                     "watermark_font_size": self.watermark_font_size,
                     "watermark_opacity": self.watermark_opacity,
+                    "watermark_font": self.watermark_font,
+                    "watermark_bold": self.watermark_bold,
+                    "watermark_italic": self.watermark_italic,
+                    "watermark_color": self.watermark_color,
+                    "watermark_shadow": self.watermark_shadow,
+                    "watermark_stroke": self.watermark_stroke,
+                    "watermark_stroke_width": self.watermark_stroke_width,
+                    "watermark_stroke_color": self.watermark_stroke_color,
                     "export_format": self.export_format,
                     "export_quality": self.export_quality,
                     "use_suffix": self.use_suffix,
@@ -993,21 +1261,30 @@ class ImageWatermarkTool(QMainWindow):
                             template = json.load(f)
                         
                         # 格式化模板详情
-                        details = []
-                        details.append(f"模板名称: {template.get('name', '未知')}")
-                        details.append(f"水印文本: {template.get('watermark_text', '无')}")
-                        details.append(f"字体大小: {template.get('watermark_font_size', '默认')}")
-                        details.append(f"透明度: {template.get('watermark_opacity', 128)}")
-                        details.append(f"导出格式: {template.get('export_format', 'JPEG')}")
-                        details.append(f"导出质量: {template.get('export_quality', 90)}%")
-                        details.append(f"使用后缀: {'是' if template.get('use_suffix', False) else '否'}")
-                        if template.get('use_suffix', False):
-                            details.append(f"后缀文本: {template.get('suffix_text', '')}")
-                        details.append(f"保存到原目录: {'是' if template.get('save_to_same_dir', False) else '否'}")
-                        
-                        QMessageBox.information(
-                            self, "模板详情", "\n".join(details)
-                        )
+                details = []
+                details.append(f"模板名称: {template.get('name', '未知')}")
+                details.append(f"水印文本: {template.get('watermark_text', '无')}")
+                details.append(f"字体: {template.get('watermark_font', '默认')}")
+                details.append(f"字体大小: {template.get('watermark_font_size', '默认')}")
+                details.append(f"粗体: {'是' if template.get('watermark_bold', False) else '否'}")
+                details.append(f"斜体: {'是' if template.get('watermark_italic', False) else '否'}")
+                details.append(f"颜色: {template.get('watermark_color', '白色')}")
+                details.append(f"透明度: {template.get('watermark_opacity', 128)}")
+                details.append(f"阴影: {'是' if template.get('watermark_shadow', False) else '否'}")
+                details.append(f"描边: {'是' if template.get('watermark_stroke', False) else '否'}")
+                if template.get('watermark_stroke', False):
+                    details.append(f"描边宽度: {template.get('watermark_stroke_width', 1)}")
+                    details.append(f"描边颜色: {template.get('watermark_stroke_color', '黑色')}")
+                details.append(f"导出格式: {template.get('export_format', 'JPEG')}")
+                details.append(f"导出质量: {template.get('export_quality', 90)}%")
+                details.append(f"使用后缀: {'是' if template.get('use_suffix', False) else '否'}")
+                if template.get('use_suffix', False):
+                    details.append(f"后缀文本: {template.get('suffix_text', '')}")
+                details.append(f"保存到原目录: {'是' if template.get('save_to_same_dir', False) else '否'}")
+                         
+                QMessageBox.information(
+                    self, "模板详情", "\n".join(details)
+                )
         except Exception as e:
             QMessageBox.critical(self, "错误", f"管理模板时出错: {str(e)}")
             
