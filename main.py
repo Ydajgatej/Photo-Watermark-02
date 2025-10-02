@@ -528,16 +528,26 @@ class ImageWatermarkTool(QMainWindow):
                     
     def pil_to_qimage(self, pil_image):
         """将PIL Image转换为QImage"""
-        if pil_image.mode == "RGB":
-            r, g, b = pil_image.split()
-            pil_image = Image.merge("RGB", (b, g, r))
-        elif pil_image.mode == "RGBA":
-            r, g, b, a = pil_image.split()
-            pil_image = Image.merge("RGBA", (b, g, r, a))
-        
+        # 不需要交换RGB通道，因为QImage可以直接处理正确的RGB格式
+        # 保留原始颜色通道顺序以确保颜色显示一致
         data = pil_image.tobytes("raw", pil_image.mode)
-        q_image = QImage(data, pil_image.size[0], pil_image.size[1], pil_image.size[0] * len(pil_image.mode),
-                        QImage.Format_RGB888 if pil_image.mode == "RGB" else QImage.Format_RGBA8888)
+        
+        # 根据图像模式选择正确的QImage格式
+        if pil_image.mode == "RGB":
+            format = QImage.Format_RGB888
+        elif pil_image.mode == "RGBA":
+            format = QImage.Format_RGBA8888
+        else:
+            # 将其他模式转换为RGB
+            pil_image = pil_image.convert("RGB")
+            data = pil_image.tobytes("raw", "RGB")
+            format = QImage.Format_RGB888
+            
+        q_image = QImage(data, pil_image.size[0], pil_image.size[1], pil_image.size[0] * len(pil_image.mode), format)
+        
+        # 确保RGB图像在Qt中正确显示
+        if pil_image.mode == "RGB" or pil_image.mode == "RGBA":
+            q_image = q_image.rgbSwapped()
         return q_image
         
     def get_system_fonts(self):
@@ -577,19 +587,36 @@ class ImageWatermarkTool(QMainWindow):
             if not os.path.isfile(font_path):
                 # 尝试添加扩展名
                 if not any(ext in font_path.lower() for ext in ['.ttf', '.ttc', '.otf']):
+                    found = False
+                    # 尝试各种可能的字体文件扩展名和变体
                     for ext in ['.ttf', '.ttc', '.otf']:
+                        # 尝试直接匹配
                         if f"{font_path}{ext}" in self.system_fonts:
                             font_path = f"{font_path}{ext}"
+                            found = True
+                            break
+                        # 尝试在系统字体中查找包含字体名称的文件
+                        for system_font in self.system_fonts:
+                            if font_path.lower() in system_font.lower() and ext in system_font.lower():
+                                font_path = system_font
+                                found = True
+                                break
+                        if found:
                             break
                 
                 # 如果字体在系统字体列表中，尝试构建完整路径
-                if font_path in self.system_fonts:
+                if not os.path.isfile(font_path):
                     font_path = os.path.join(r'C:\Windows\Fonts', font_path)
                 
             font = ImageFont.truetype(font_path, self.watermark_font_size)
-        except IOError:
-            # 使用默认字体
-            font = ImageFont.load_default()
+        except (IOError, OSError):
+            # 尝试使用更通用的字体加载方法
+            try:
+                # 尝试使用PIL的字体查找功能
+                font = ImageFont.truetype(self.watermark_font, self.watermark_font_size)
+            except:
+                # 使用默认字体
+                font = ImageFont.load_default()
         
         # 计算文本尺寸
         try:
