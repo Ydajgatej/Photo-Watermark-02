@@ -9,9 +9,10 @@ from PyQt5.QtWidgets import (
     QLineEdit, QGridLayout, QComboBox, QSlider, QCheckBox, QRadioButton, QButtonGroup, QInputDialog, QColorDialog
 )
 from PyQt5.QtGui import QPixmap, QImage, QFont, QIcon, QColor
-from PyQt5.QtCore import Qt, QSize, QPoint
+from PyQt5.QtCore import Qt, QSize, QPoint, QTimer
 from PIL import Image, ImageQt, ImageDraw, ImageFont
 import glob
+import functools
 
 class ImageWatermarkTool(QMainWindow):
     def __init__(self):
@@ -20,7 +21,7 @@ class ImageWatermarkTool(QMainWindow):
         self.current_image_index = -1  # 当前选中的图片索引
         
         # 水印相关变量
-        self.watermark_text = ""
+        self.watermark_text = ""  # 空字符串
         self.watermark_position = (0.5, 0.5)  # 默认居中位置（相对坐标）
         self.watermark_font_size = 30
         self.watermark_color = "white"
@@ -38,6 +39,18 @@ class ImageWatermarkTool(QMainWindow):
         self.settings_file = os.path.join(self.templates_dir, "last_settings.json")
         self.system_fonts = self.get_system_fonts()  # 获取系统字体列表
         self.load_last_settings()
+        
+        # 优化性能相关变量
+        self.preview_timer = QTimer(self)  # 预览更新计时器
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.setInterval(100)  # 100ms延迟
+        self.preview_timer.timeout.connect(self._update_preview_delayed)
+        
+        # 初始化缓存字典
+        self.cached_fonts = {}
+        self.original_image_cache = {}
+        self.processed_image_cache = {}
+        self.render_cache = {}  # 用于缓存渲染结果
         
         # 水印预设位置（九宫格）
         self.position_presets = {
@@ -478,19 +491,53 @@ class ImageWatermarkTool(QMainWindow):
             self.update_preview()
     
     def update_preview(self):
+        """请求更新预览（使用延迟机制避免频繁更新）"""
+        self.preview_timer.start()  # 重启计时器
+        
+    def _update_preview_delayed(self):
+        """实际执行预览更新的方法（延迟执行）"""
         if 0 <= self.current_image_index < len(self.image_list):
             # 获取当前图片路径
             current_image_path = self.image_list[self.current_image_index]
             
-            # 加载图片
-            image = Image.open(current_image_path)
+            # 生成缓存键
+            cache_key = (
+                current_image_path,
+                self.watermark_text,
+                self.watermark_position,
+                self.watermark_font_size,
+                self.watermark_opacity,
+                self.watermark_font,
+                self.watermark_bold,
+                self.watermark_italic,
+                self.watermark_color,
+                self.watermark_shadow,
+                self.watermark_stroke,
+                self.watermark_stroke_width,
+                self.watermark_stroke_color
+            )
             
-            # 如果有水印文本，应用水印
-            if self.watermark_text:
-                image = self.add_watermark_to_image(image)
+            # 检查是否有缓存的处理后图片
+            if cache_key in self.processed_image_cache:
+                q_image = self.processed_image_cache[cache_key]
+            else:
+                # 检查是否有缓存的原始图片
+                if current_image_path not in self.original_image_cache:
+                    # 加载原始图片并缓存
+                    self.original_image_cache[current_image_path] = Image.open(current_image_path).copy()
+                
+                # 使用缓存的原始图片进行处理
+                image = self.original_image_cache[current_image_path].copy()
+                
+                # 如果有水印文本，应用水印
+                if self.watermark_text:
+                    image = self.add_watermark_to_image(image)
+                
+                # 转换为QImage并缓存
+                q_image = self.pil_to_qimage(image)
+                self.processed_image_cache[cache_key] = q_image
             
             # 转换为QPixmap用于显示
-            q_image = self.pil_to_qimage(image)
             pixmap = QPixmap.fromImage(q_image)
             
             if not pixmap.isNull():
@@ -498,21 +545,22 @@ class ImageWatermarkTool(QMainWindow):
                 preview_size = self.preview_label.size()
                 scaled_pixmap = pixmap.scaled(
                     preview_size.width() - 20, preview_size.height() - 20, 
-                    Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    Qt.KeepAspectRatio, Qt.FastTransformation  # 使用FastTransformation代替SmoothTransformation
                 )
                 
                 # 更新预览标签
                 self.preview_label.setPixmap(scaled_pixmap)
                 
-                # 启用导出按钮
-                self.export_button.setEnabled(True)
-                for action in self.menuBar().actions():
-                    if action.text() == '文件':
-                        for sub_action in action.menu().actions():
-                            if sub_action.text() == '导出图片':
-                                sub_action.setEnabled(True)
-                                break
-                        break
+                # 启用导出按钮（只在状态变化时更新）
+                if not self.export_button.isEnabled():
+                    self.export_button.setEnabled(True)
+                    for action in self.menuBar().actions():
+                        if action.text() == '文件':
+                            for sub_action in action.menu().actions():
+                                if sub_action.text() == '导出图片':
+                                    sub_action.setEnabled(True)
+                                    break
+                            break
             else:
                 # 显示错误信息
                 self.preview_label.setText('无法加载图片')
@@ -526,337 +574,123 @@ class ImageWatermarkTool(QMainWindow):
                             sub_action.setEnabled(False)
                             break
                     break
+            
+    def clear_cache(self):
+        """清除图片缓存，在必要时调用"""
+        self.original_image_cache.clear()
+        self.processed_image_cache.clear()
                     
     def pil_to_qimage(self, pil_image):
-        """将PIL Image转换为QImage，确保颜色显示一致"""
-        # 确保图像模式正确
-        if pil_image.mode != "RGBA":
-            pil_image = pil_image.convert("RGBA")
-        
-        # 获取图像数据
-        width, height = pil_image.size
-        
-        # PIL的RGBA格式是RGBA，但QImage需要的是BGRA
-        # 创建一个新的字节数组存储BGRA数据
-        bgra_data = bytearray(width * height * 4)
-        pixels = pil_image.load()
-        
-        # 优化颜色通道转换，确保颜色一致性
-        for y in range(height):
-            for x in range(width):
-                try:
-                    # 获取像素的RGBA值
-                    r, g, b, a = pixels[x, y]
-                    # 确保值在有效范围内
-                    r = max(0, min(255, r))
-                    g = max(0, min(255, g))
-                    b = max(0, min(255, b))
-                    a = max(0, min(255, a))
-                    
-                    # 转换为BGRA格式
-                    index = (y * width + x) * 4
-                    bgra_data[index] = b  # 蓝色
-                    bgra_data[index + 1] = g  # 绿色
-                    bgra_data[index + 2] = r  # 红色
-                    bgra_data[index + 3] = a  # 透明度
-                except Exception:
-                    # 处理可能的像素访问错误
-                    index = (y * width + x) * 4
-                    bgra_data[index] = 255  # 蓝色
-                    bgra_data[index + 1] = 255  # 绿色
-                    bgra_data[index + 2] = 255  # 红色
-                    bgra_data[index + 3] = 255  # 透明度
-        
-        # 创建QImage，使用正确的格式确保颜色通道正确
-        # 对于BGRA数据，使用Format_ARGB32格式（小端系统上等同于BGRA）
-        q_image = QImage(bgra_data, width, height, width * 4, QImage.Format_ARGB32)
-        
-        # 设置设备像素比以确保在高DPI显示器上正确显示
-        q_image.setDevicePixelRatio(1.0)
-        
-        return q_image
+        """将PIL Image转换为QImage（高性能版本）"""
+        try:
+            # 转换为RGB模式以获得最佳性能
+            if pil_image.mode == 'RGBA':
+                # 对于RGBA图像，先转换为RGB再处理
+                bg = Image.new('RGB', pil_image.size, (255, 255, 255))
+                bg.paste(pil_image, mask=pil_image.split()[3])  # 3 is the alpha channel
+                pil_image = bg
+            elif pil_image.mode != 'RGB':
+                pil_image = pil_image.convert('RGB')
+            
+            # 获取图像数据（直接获取原始数据，避免逐像素处理）
+            width, height = pil_image.size
+            data = pil_image.tobytes('raw', 'RGB')
+            
+            # 创建QImage，使用Format_RGB888格式，不需要交换通道
+            q_image = QImage(data, width, height, 3 * width, QImage.Format_RGB888)
+            return q_image  # 不再交换RGB通道，因为Format_RGB888已经正确处理了RGB顺序
+        except Exception as e:
+            # 处理异常情况，创建一个白色占位图像
+            empty_image = QImage(100, 100, QImage.Format_RGB888)
+            empty_image.fill(Qt.white)
+            return empty_image
         
     def get_system_fonts(self):
-        """获取系统已安装的字体列表"""
+        """获取系统已安装的字体列表（优化性能版本）"""
+        # 使用缓存避免重复扫描
+        if hasattr(self, 'cached_system_fonts'):
+            return self.cached_system_fonts
+        
         fonts = []
+        max_fonts = 200  # 限制字体总数，避免扫描过多文件
+        
         # 尝试从常见的字体目录获取字体
-        font_dirs = [
-            r'C:\Windows\Fonts',
-            r'/usr/share/fonts',
-            r'/Library/Fonts',
-            r'~/Library/Fonts'
+        font_dirs = []
+        
+        # 根据操作系统选择主要字体目录
+        if os.name == 'nt':
+            # Windows系统
+            font_dirs.append(r'C:\Windows\Fonts')
+        elif sys.platform == 'darwin':
+            # macOS系统
+            font_dirs.append('/Library/Fonts')
+        else:
+            # Linux/Unix系统
+            font_dirs.append('/usr/share/fonts')
+        
+        # 添加常用字体作为默认选项
+        common_fonts = [
+            'Arial.ttf', 'Arial.ttc', 'times.ttf', 'times.ttc',
+            'simhei.ttf', 'simsun.ttc', 'msyh.ttc', 'msyhbd.ttc',
+            'calibri.ttf', 'verdana.ttf', 'tahoma.ttf'
         ]
         
         for font_dir in font_dirs:
             font_dir = os.path.expanduser(font_dir)
             if os.path.exists(font_dir):
-                # 查找常见的字体文件
-                for ext in ['ttf', 'ttc', 'otf']:
-                    fonts.extend(glob.glob(os.path.join(font_dir, f'*.{ext}')))
+                try:
+                    # 使用更快的os.listdir代替glob.glob
+                    items = os.listdir(font_dir)[:300]  # 限制扫描文件数量
+                    for item in items:
+                        if len(fonts) >= max_fonts:
+                            break
+                        
+                        # 检查文件扩展名
+                        ext = os.path.splitext(item)[1].lower()[1:]  # 获取不带点的扩展名
+                        if ext in ['ttf', 'ttc', 'otf']:
+                            fonts.append(os.path.join(font_dir, item))
+                except Exception:
+                    continue
         
-        # 返回字体文件名列表
-        return [os.path.basename(font) for font in fonts]
+        # 添加常用字体到结果中（如果它们不存在）
+        for common_font in common_fonts:
+            common_font_path = os.path.join(font_dirs[0], common_font) if font_dirs else common_font
+            if common_font_path not in fonts and len(fonts) < max_fonts:
+                fonts.append(common_font_path)
+        
+        # 去重并保留顺序
+        seen = set()
+        unique_fonts = []
+        for font_path in fonts:
+            font_name = os.path.basename(font_path)
+            if font_name not in seen:
+                seen.add(font_name)
+                unique_fonts.append(font_path)
+        
+        # 缓存结果
+        result = [os.path.basename(font) for font in unique_fonts]
+        self.cached_system_fonts = result
+        
+        return result
     
     def add_watermark_to_image(self, image):
-        """向图片添加文本水印"""
+        """向图片添加文本水印（高性能版本）"""
+        # 快速路径：如果水印文本为空，直接返回原图
+        if not self.watermark_text.strip():
+            return image
+        
         # 创建可绘制对象
         draw = ImageDraw.Draw(image, 'RGBA')
         
         # 获取图片尺寸
         width, height = image.size
         
-        # 尝试加载字体，失败则使用默认字体
-        try:
-            # 尝试使用选择的字体
-            font_path = self.watermark_font
-            found = False
-            
-            # 特殊处理常见字体，确保正确加载
-            common_fonts = {
-                'times': 'times.ttf',
-                'times new roman': 'times.ttf',
-                'calibri': 'calibri.ttf',
-                'arial': 'arial.ttf',
-                'courier': 'cour.ttf',
-                'verdana': 'verdana.ttf',
-                'tahoma': 'tahoma.ttf',
-                'comic sans ms': 'comic.ttf',
-                'impact': 'impact.ttf',
-                'georgia': 'georgia.ttf',
-                'palatino': 'pala.ttf',
-                'bookman': 'bookman.ttf',
-                'century': 'century.ttf'
-            }
-            
-            # 检查是否有完整路径，如果没有则尝试在系统字体中查找
-            if not os.path.isfile(font_path):
-                # 先尝试在系统字体目录中直接查找
-                system_font_dir = r'C:\Windows\Fonts'
-                if os.path.exists(system_font_dir):
-                    # 转换为小写以进行不区分大小写的匹配
-                    font_lower = font_path.lower()
-                    
-                    # 首先检查是否是常见字体
-                    for common_name, common_filename in common_fonts.items():
-                        if common_name in font_lower:
-                            candidate = os.path.join(system_font_dir, common_filename)
-                            if os.path.isfile(candidate):
-                                font_path = candidate
-                                found = True
-                                break
-                    
-                    # 如果不是常见字体或常见字体文件不存在，尝试更多变体
-                    if not found:
-                        # 对于常见字体如Times、Calibri，先尝试直接匹配文件名变体
-                        font_variants = [
-                            font_path,
-                            font_path.lower(),
-                            font_path.replace(' ', ''),
-                            font_path.replace(' ', '-'),
-                            font_path.split(' ')[0],  # 只取第一个单词，如'Times New Roman' -> 'Times'
-                            font_path.split('-')[0],  # 只取第一个单词，如'Times-New-Roman' -> 'Times'
-                            # 添加更多可能的字体名称变体
-                            font_path.replace('&', 'and'),  # 将 '&' 替换为 'and'
-                            font_path.replace('+', 'plus')   # 将 '+' 替换为 'plus'
-                        ]
-                        
-                        # 尝试添加扩展名
-                        for base_name in font_variants:
-                            # 尝试常见的字体文件名格式
-                            formats = [
-                                f'{base_name}{{ext}}',
-                                f'{base_name.capitalize()}{{ext}}',
-                                f'{base_name.replace(" ", "")}{{ext}}',
-                                f'{base_name.upper()}{{ext}}',
-                                f'{base_name.lower()}{{ext}}',
-                                f'{base_name.split()[-1]}{{ext}}'  # 只取最后一个单词
-                            ]
-                            
-                            for fmt in formats:
-                                for ext in ['.ttf', '.ttc', '.otf', '.fon', '.ttx']:
-                                    # 尝试直接匹配
-                                    candidate = os.path.join(system_font_dir, fmt.format(ext=ext))
-                                    if os.path.isfile(candidate):
-                                        font_path = candidate
-                                        found = True
-                                        break
-                                    # 尝试在文件名中间添加变体标记
-                                    candidate = os.path.join(system_font_dir, fmt.format(ext='') + '_' + ext.lstrip('.'))
-                                    if os.path.isfile(candidate):
-                                        font_path = candidate
-                                        found = True
-                                        break
-                                if found:
-                                    break
-                            if found:
-                                break
-                        
-                        # 如果没找到，尝试更宽松的匹配方式
-                        if not found:
-                            for system_font in self.system_fonts:
-                                font_name = os.path.splitext(system_font)[0].lower()
-                                font_base = font_path.lower()
-                                # 允许部分匹配和变体匹配
-                                if any(keyword in font_name for keyword in font_base.split()) or \
-                                   any(keyword.replace(' ', '') in font_name.replace(' ', '') for keyword in font_base.split()):
-                                    font_path = os.path.join(system_font_dir, system_font)
-                                    found = True
-                                    break
-            
-            # 尝试加载带有粗体和斜体样式的字体
-            # 先尝试获取字体的基本名称
-            font_base_name = os.path.splitext(os.path.basename(font_path))[0]
-            system_font_dir = r'C:\Windows\Fonts'
-            
-            # 构建可能的字体变体名称，增加更多可能的格式和常见字体的特殊处理
-            font_variants = []
-            if self.watermark_bold and self.watermark_italic:
-                # 粗斜体 - 增加更多常见的变体格式
-                font_variants.extend([
-                    f"{font_base_name} Bold Italic",
-                    f"{font_base_name} BoldIt",
-                    f"{font_base_name} BI",
-                    f"{font_base_name}-BoldItalic",
-                    f"{font_base_name}BdIt",
-                    f"{font_base_name} BoldOblique",
-                    f"{font_base_name}BO",
-                    f"{font_base_name}_Bold_Italic",
-                    f"{font_base_name}bi",  # 简洁格式
-                    f"{font_base_name}bol",  # 可能的缩写
-                    f"{font_base_name}boldital",  # 可能的缩写
-                    f"{font_base_name}bold_italic",  # 带下划线
-                    f"{font_base_name}.bold-italic"  # 带点号
-                ])
-            elif self.watermark_bold:
-                # 粗体 - 增加更多常见的变体格式
-                font_variants.extend([
-                    f"{font_base_name} Bold",
-                    f"{font_base_name}-Bold",
-                    f"{font_base_name}Bd",
-                    f"{font_base_name}Bold",
-                    f"{font_base_name}_Bold",
-                    f"{font_base_name}bol",  # 可能的缩写
-                    f"{font_base_name}bold",  # 小写
-                    f"{font_base_name}_bold",  # 带下划线
-                    f"{font_base_name}.bold"  # 带点号
-                ])
-            elif self.watermark_italic:
-                # 斜体 - 增加更多常见的变体格式
-                font_variants.extend([
-                    f"{font_base_name} Italic",
-                    f"{font_base_name}-Italic",
-                    f"{font_base_name}It",
-                    f"{font_base_name}Oblique",
-                    f"{font_base_name}_Italic",
-                    f"{font_base_name}ita",  # 可能的缩写
-                    f"{font_base_name}italic",  # 小写
-                    f"{font_base_name}_italic",  # 带下划线
-                    f"{font_base_name}.italic"  # 带点号
-                ])
-            
-            # 尝试加载有样式的字体 - 增强实现
-            styled_font = None
-            if font_variants and os.path.exists(system_font_dir):
-                for variant in font_variants:
-                    for ext in ['.ttf', '.ttc', '.otf', '.fon', '.ttx']:
-                        # 尝试直接匹配
-                        variant_path = os.path.join(system_font_dir, variant + ext)
-                        if os.path.isfile(variant_path):
-                            try:
-                                styled_font = ImageFont.truetype(variant_path, self.watermark_font_size)
-                                break
-                            except:
-                                continue
-                        # 尝试小写版本
-                        variant_lower = variant.lower()
-                        variant_path = os.path.join(system_font_dir, variant_lower + ext)
-                        if os.path.isfile(variant_path):
-                            try:
-                                styled_font = ImageFont.truetype(variant_path, self.watermark_font_size)
-                                break
-                            except:
-                                continue
-                        # 尝试大写版本
-                        variant_upper = variant.upper()
-                        variant_path = os.path.join(system_font_dir, variant_upper + ext)
-                        if os.path.isfile(variant_path):
-                            try:
-                                styled_font = ImageFont.truetype(variant_path, self.watermark_font_size)
-                                break
-                            except:
-                                continue
-                        # 尝试无空格版本
-                        variant_nospace = variant.replace(' ', '')
-                        variant_path = os.path.join(system_font_dir, variant_nospace + ext)
-                        if os.path.isfile(variant_path):
-                            try:
-                                styled_font = ImageFont.truetype(variant_path, self.watermark_font_size)
-                                break
-                            except:
-                                continue
-                    if styled_font:
-                        break
-            
-            # 如果找不到有样式的字体，尝试备选方案：
-            # 1. 尝试使用PIL的字体样式支持
-            if not styled_font and (self.watermark_bold or self.watermark_italic):
-                try:
-                    # 创建基础字体
-                    base_font = ImageFont.truetype(font_path, self.watermark_font_size)
-                    # 注意：PIL实际上不支持动态添加粗体/斜体样式，所以这里只是保留尝试逻辑
-                    styled_font = base_font
-                except:
-                    pass
-            
-            # 如果找不到有样式的字体，则使用原始字体
-            font = styled_font if styled_font else ImageFont.truetype(font_path, self.watermark_font_size)
-            
-        except (IOError, OSError):
-            # 尝试使用更通用的字体加载方法 - 增加更多备选方案和常见字体特殊处理
-            try:
-                # 特殊处理常见字体
-                font_lower = self.watermark_font.lower()
-                for common_name, common_filename in common_fonts.items():
-                    if common_name in font_lower:
-                        # 尝试使用系统字体目录
-                        system_font_dir = r'C:\Windows\Fonts'
-                        if os.path.exists(system_font_dir):
-                            candidate = os.path.join(system_font_dir, common_filename)
-                            if os.path.isfile(candidate):
-                                font = ImageFont.truetype(candidate, self.watermark_font_size)
-                                break
-                else:
-                    # 尝试使用PIL的字体查找功能
-                    font = ImageFont.truetype(self.watermark_font, self.watermark_font_size)
-            except:
-                try:
-                    # 尝试去除字体名称中的空格
-                    simplified_font = self.watermark_font.replace(' ', '')
-                    font = ImageFont.truetype(simplified_font, self.watermark_font_size)
-                except:
-                    try:
-                        # 尝试使用字体名称的一部分
-                        font_parts = self.watermark_font.split(' ')
-                        for i in range(1, len(font_parts) + 1):
-                            try:
-                                partial_font = ' '.join(font_parts[:i])
-                                font = ImageFont.truetype(partial_font, self.watermark_font_size)
-                                break
-                            except:
-                                continue
-                        else:
-                            raise Exception("Partial font not found")
-                    except:
-                        try:
-                            # 尝试使用字体名称的大写形式
-                            font = ImageFont.truetype(self.watermark_font.upper(), self.watermark_font_size)
-                        except:
-                            try:
-                                # 尝试使用字体名称的小写形式
-                                font = ImageFont.truetype(self.watermark_font.lower(), self.watermark_font_size)
-                            except:
-                                # 最后尝试使用默认字体
-                                font = ImageFont.load_default()
+        # 尝试加载字体（使用缓存优化）
+        font = self._get_font()
+        
+        if font is None:
+            # 如果无法加载字体，使用默认字体
+            font = ImageFont.load_default()
         
         # 计算文本尺寸
         try:
@@ -866,7 +700,11 @@ class ImageWatermarkTool(QMainWindow):
             text_height = bbox[3] - bbox[1]
         except:
             # 旧版Pillow
-            text_width, text_height = draw.textsize(self.watermark_text, font=font)
+            try:
+                text_width, text_height = draw.textsize(self.watermark_text, font=font)
+            except:
+                # 降级为保守的默认值
+                text_width, text_height = 100, 50
         
         # 计算水印位置
         pos_x = int(self.watermark_position[0] * width - text_width / 2)
@@ -878,26 +716,115 @@ class ImageWatermarkTool(QMainWindow):
         
         # 将颜色名称转换为RGB值
         color_rgb = self.get_rgb_from_color(self.watermark_color)
-        stroke_rgb = self.get_rgb_from_color(self.watermark_stroke_color)
         
         # 构建带透明度的颜色
         fill_color = (*color_rgb, self.watermark_opacity)
         
-        # 添加特效
-        if self.watermark_shadow:
-            # 添加阴影
+        # 添加特效 - 优先级优化（减少不必要的处理）
+        if self.watermark_stroke:
+            # 添加描边 - 高性能版本
+            stroke_rgb = self.get_rgb_from_color(self.watermark_stroke_color)
+            stroke_color = (*stroke_rgb, self.watermark_opacity)
+            stroke_width = self.watermark_stroke_width
+            
+            # 基于文本尺寸的描边策略
+            if text_width < 100 or text_height < 50:
+                # 小文本：只绘制4个方向的描边，减少绘制次数
+                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    draw.text((pos_x + dx * stroke_width, pos_y + dy * stroke_width), 
+                              self.watermark_text, fill=stroke_color, font=font)
+            else:
+                # 大文本：使用简化的偏移算法
+                max_offset = min(stroke_width, 3)  # 限制最大偏移量以提高性能
+                for dx in range(-max_offset, max_offset + 1):
+                    for dy in range(-max_offset, max_offset + 1):
+                        # 只绘制边缘点，减少内部点的绘制
+                        if abs(dx) == max_offset or abs(dy) == max_offset:
+                            draw.text((pos_x + dx, pos_y + dy), self.watermark_text, 
+                                      fill=stroke_color, font=font)
+        
+        if self.watermark_shadow and not self.watermark_stroke:
+            # 只有在没有描边的情况下才添加阴影
             shadow_offset = 2
             shadow_color = (0, 0, 0, int(self.watermark_opacity * 0.5))
             draw.text((pos_x + shadow_offset, pos_y + shadow_offset), self.watermark_text, 
                       fill=shadow_color, font=font)
         
-        if self.watermark_stroke:
-            # 添加描边
-            for x_offset in range(-self.watermark_stroke_width, self.watermark_stroke_width + 1):
-                for y_offset in range(-self.watermark_stroke_width, self.watermark_stroke_width + 1):
-                    if x_offset != 0 or y_offset != 0:
-                        draw.text((pos_x + x_offset, pos_y + y_offset), self.watermark_text, 
-                                  fill=(*stroke_rgb, self.watermark_opacity), font=font)
+        # 添加主水印文本
+        draw.text((pos_x, pos_y), self.watermark_text, fill=fill_color, font=font)
+        
+        return image
+        
+    def _get_font(self):
+        """获取字体（高性能版本，带缓存优化）"""
+        # 生成字体缓存键
+        font_key = (
+            self.watermark_font,
+            self.watermark_font_size,
+            self.watermark_bold,
+            self.watermark_italic
+        )
+        
+        # 快速路径：检查是否有缓存的字体
+        if font_key in self.cached_fonts:
+            return self.cached_fonts[font_key]
+        
+        # 特殊处理常见字体，确保正确加载
+        common_fonts = {
+            'times': 'times.ttf',
+            'times new roman': 'times.ttf',
+            'calibri': 'calibri.ttf',
+            'arial': 'arial.ttf',
+            'courier': 'cour.ttf',
+            'verdana': 'verdana.ttf',
+            'tahoma': 'tahoma.ttf',
+            'comic sans ms': 'comic.ttf',
+            'impact': 'impact.ttf',
+            'georgia': 'georgia.ttf',
+            'palatino': 'pala.ttf',
+            'bookman': 'bookman.ttf',
+            'century': 'century.ttf',
+            'simhei': 'simhei.ttf',
+            'simsun': 'simsun.ttc',
+            'msyh': 'msyh.ttc'
+        }
+        
+        font_path = self.watermark_font
+        
+        try:
+            # 检查是否有完整路径，如果没有则尝试在系统字体中查找
+            if not os.path.isfile(font_path):
+                # 先尝试在系统字体目录中直接查找
+                system_font_dir = r'C:\Windows\Fonts'
+                if os.path.exists(system_font_dir):
+                    # 转换为小写以进行不区分大小写的匹配
+                    font_lower = font_path.lower()
+                    
+                    # 首先检查是否是常见字体（快速路径）
+                    if font_lower in common_fonts:
+                        candidate = os.path.join(system_font_dir, common_fonts[font_lower])
+                        if os.path.isfile(candidate):
+                            font_path = candidate
+                    else:
+                        # 不是常见字体，尝试直接匹配字体文件名（简化逻辑）
+                        font_file = font_path
+                        if not any(font_file.lower().endswith(ext) for ext in ['.ttf', '.ttc', '.otf']):
+                            # 只尝试.ttf扩展名作为主要选项
+                            candidate = os.path.join(system_font_dir, f'{font_file}.ttf')
+                            if os.path.isfile(candidate):
+                                font_path = candidate
+            
+            # 尝试加载字体
+            font = ImageFont.truetype(font_path, self.watermark_font_size)
+            
+            # 缓存成功加载的字体
+            self.cached_fonts[font_key] = font
+        except Exception:
+            # 发生任何异常时，直接使用默认字体
+            font = ImageFont.load_default()
+            self.cached_fonts[font_key] = font
+        
+        return font
         
         # 添加水印文本
         draw.text((pos_x, pos_y), self.watermark_text, fill=fill_color, font=font)
@@ -1453,6 +1380,51 @@ class ImageWatermarkTool(QMainWindow):
                 if "save_to_same_dir" in template:
                     self.save_to_same_dir = template["save_to_same_dir"]
                     self.save_same_dir_checkbox.setChecked(self.save_to_same_dir)
+                    
+                # 加载其他水印设置参数
+                if "watermark_font" in template:
+                    self.watermark_font = template["watermark_font"]
+                    font_name = os.path.splitext(self.watermark_font)[0]
+                    index = self.font_combo.findText(font_name)
+                    if index >= 0:
+                        self.font_combo.setCurrentIndex(index)
+                        
+                if "watermark_bold" in template:
+                    self.watermark_bold = template["watermark_bold"]
+                    self.bold_checkbox.setChecked(self.watermark_bold)
+                    
+                if "watermark_italic" in template:
+                    self.watermark_italic = template["watermark_italic"]
+                    self.italic_checkbox.setChecked(self.watermark_italic)
+                    
+                if "watermark_color" in template:
+                    self.watermark_color = template["watermark_color"]
+                    if hasattr(self, 'color_button') and hasattr(self, 'color_label'):
+                        self.color_button.setStyleSheet(f"background-color: {self.watermark_color}")
+                        self.color_label.setText(self.watermark_color)
+                        
+                if "watermark_shadow" in template:
+                    self.watermark_shadow = template["watermark_shadow"]
+                    if hasattr(self, 'shadow_checkbox'):
+                        self.shadow_checkbox.setChecked(self.watermark_shadow)
+                        
+                if "watermark_stroke" in template:
+                    self.watermark_stroke = template["watermark_stroke"]
+                    if hasattr(self, 'stroke_checkbox') and hasattr(self, 'stroke_width_slider'):
+                        self.stroke_checkbox.setChecked(self.watermark_stroke)
+                        self.stroke_width_slider.setEnabled(self.watermark_stroke)
+                        
+                if "watermark_stroke_width" in template:
+                    self.watermark_stroke_width = template["watermark_stroke_width"]
+                    if hasattr(self, 'stroke_width_slider') and hasattr(self, 'stroke_width_label'):
+                        self.stroke_width_slider.setValue(self.watermark_stroke_width)
+                        self.stroke_width_label.setText(str(self.watermark_stroke_width))
+                        
+                if "watermark_stroke_color" in template:
+                    self.watermark_stroke_color = template["watermark_stroke_color"]
+                    if hasattr(self, 'stroke_color_button') and hasattr(self, 'stroke_color_label'):
+                        self.stroke_color_button.setStyleSheet(f"background-color: {self.watermark_stroke_color}")
+                        self.stroke_color_label.setText(self.watermark_stroke_color)
                 
                 # 更新预览
                 self.update_preview()
@@ -1464,6 +1436,17 @@ class ImageWatermarkTool(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"加载模板时出错: {str(e)}")
             
+    def _get_position_name(self, position):
+        """将位置坐标转换为可读的位置名称"""
+        for name, pos in self.position_presets.items():
+            if pos == position:
+                return name
+        # 如果没有找到精确匹配，返回一个描述性的字符串
+        x, y = position
+        x_desc = "左" if x < 0.33 else "中" if x < 0.66 else "右"
+        y_desc = "上" if y < 0.33 else "中" if y < 0.66 else "下"
+        return f"{y_desc}{x_desc}"
+        
     def manage_templates(self):
         """管理和删除已保存的模板"""
         try:
@@ -1553,26 +1536,28 @@ class ImageWatermarkTool(QMainWindow):
                             template = json.load(f)
                         
                         # 格式化模板详情
-                details = []
-                details.append(f"模板名称: {template.get('name', '未知')}")
-                details.append(f"水印文本: {template.get('watermark_text', '无')}")
-                details.append(f"字体: {template.get('watermark_font', '默认')}")
-                details.append(f"字体大小: {template.get('watermark_font_size', '默认')}")
-                details.append(f"粗体: {'是' if template.get('watermark_bold', False) else '否'}")
-                details.append(f"斜体: {'是' if template.get('watermark_italic', False) else '否'}")
-                details.append(f"颜色: {template.get('watermark_color', '白色')}")
-                details.append(f"透明度: {template.get('watermark_opacity', 128)}")
-                details.append(f"阴影: {'是' if template.get('watermark_shadow', False) else '否'}")
-                details.append(f"描边: {'是' if template.get('watermark_stroke', False) else '否'}")
-                if template.get('watermark_stroke', False):
-                    details.append(f"描边宽度: {template.get('watermark_stroke_width', 1)}")
-                    details.append(f"描边颜色: {template.get('watermark_stroke_color', '黑色')}")
-                details.append(f"导出格式: {template.get('export_format', 'JPEG')}")
-                details.append(f"导出质量: {template.get('export_quality', 90)}%")
-                details.append(f"使用后缀: {'是' if template.get('use_suffix', False) else '否'}")
-                if template.get('use_suffix', False):
-                    details.append(f"后缀文本: {template.get('suffix_text', '')}")
-                details.append(f"保存到原目录: {'是' if template.get('save_to_same_dir', False) else '否'}")
+                        # 格式化模板详情
+                        details = []
+                        details.append(f"模板名称: {template.get('name', '未知')}")
+                        details.append(f"水印文本: {template.get('watermark_text', '无')}")
+                        details.append(f"位置: {self._get_position_name(template.get('watermark_position', (0.5, 0.5)))}")
+                        details.append(f"字体: {template.get('watermark_font', '默认')}")
+                        details.append(f"字体大小: {template.get('watermark_font_size', '默认')}")
+                        details.append(f"粗体: {'是' if template.get('watermark_bold', False) else '否'}")
+                        details.append(f"斜体: {'是' if template.get('watermark_italic', False) else '否'}")
+                        details.append(f"颜色: {template.get('watermark_color', '白色')}")
+                        details.append(f"透明度: {int(template.get('watermark_opacity', 128) / 255 * 100)}%")
+                        details.append(f"阴影: {'是' if template.get('watermark_shadow', False) else '否'}")
+                        details.append(f"描边: {'是' if template.get('watermark_stroke', False) else '否'}")
+                        if template.get('watermark_stroke', False):
+                            details.append(f"描边宽度: {template.get('watermark_stroke_width', 1)}")
+                            details.append(f"描边颜色: {template.get('watermark_stroke_color', '黑色')}")
+                        details.append(f"导出格式: {template.get('export_format', 'JPEG')}")
+                        details.append(f"导出质量: {template.get('export_quality', 90)}%")
+                        details.append(f"使用后缀: {'是' if template.get('use_suffix', False) else '否'}")
+                        if template.get('use_suffix', False):
+                            details.append(f"后缀文本: {template.get('suffix_text', '')}")
+                        details.append(f"保存到原目录: {'是' if template.get('save_to_same_dir', False) else '否'}")
                          
                 QMessageBox.information(
                     self, "模板详情", "\n".join(details)
@@ -1580,7 +1565,7 @@ class ImageWatermarkTool(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"管理模板时出错: {str(e)}")
             
-# 重写closeEvent方法，确保关闭时保存设置
+    # 重写closeEvent方法，确保关闭时保存设置
     def closeEvent(self, event):
         self.save_current_settings()
         event.accept()
