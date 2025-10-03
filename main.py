@@ -566,8 +566,9 @@ class ImageWatermarkTool(QMainWindow):
                     bgra_data[index + 2] = 255  # 红色
                     bgra_data[index + 3] = 255  # 透明度
         
-        # 创建QImage，使用Format_RGBA8888格式确保颜色通道正确
-        q_image = QImage(bgra_data, width, height, width * 4, QImage.Format_RGBA8888)
+        # 创建QImage，使用正确的格式确保颜色通道正确
+        # 对于BGRA数据，使用Format_ARGB32格式（小端系统上等同于BGRA）
+        q_image = QImage(bgra_data, width, height, width * 4, QImage.Format_ARGB32)
         
         # 设置设备像素比以确保在高DPI显示器上正确显示
         q_image.setDevicePixelRatio(1.0)
