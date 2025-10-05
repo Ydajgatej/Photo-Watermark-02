@@ -34,11 +34,22 @@ class ImageWatermarkTool(QMainWindow):
         self.watermark_stroke_width = 1  # 描边宽度
         self.watermark_stroke_color = "black"  # 描边颜色
         
+        # 图片水印相关变量
+        self.use_image_watermark = False
+        self.watermark_image_path = ""
+        self.watermark_image_size_ratio = 20  # 水印图片相对于原图片的百分比大小
+        self.watermark_image_opacity = 128  # 0-255
+        
         # 模板相关变量
         self.templates_dir = os.path.join(os.path.expanduser("~"), ".photo_watermark_templates")
         self.settings_file = os.path.join(self.templates_dir, "last_settings.json")
         self.system_fonts = self.get_system_fonts()  # 获取系统字体列表
         self.load_last_settings()
+        
+        # 清除水印设置，确保程序启动时不显示默认水印
+        self.watermark_text = ""  # 清空水印文本
+        self.use_image_watermark = False  # 关闭图片水印
+        self.watermark_image_path = ""  # 清空水印图片路径
         
         # 优化性能相关变量
         self.preview_timer = QTimer(self)  # 预览更新计时器
@@ -196,6 +207,20 @@ class ImageWatermarkTool(QMainWindow):
         watermark_group = QGroupBox('水印设置')
         watermark_layout = QFormLayout()
         
+        # 水印类型选择
+        watermark_type_layout = QHBoxLayout()
+        self.text_watermark_radio = QRadioButton('文本水印')
+        self.image_watermark_radio = QRadioButton('图片水印')
+        self.watermark_type_group = QButtonGroup()
+        self.watermark_type_group.addButton(self.text_watermark_radio)
+        self.watermark_type_group.addButton(self.image_watermark_radio)
+        self.text_watermark_radio.setChecked(True)
+        self.text_watermark_radio.toggled.connect(self.on_watermark_type_changed)
+        self.image_watermark_radio.toggled.connect(self.on_watermark_type_changed)
+        watermark_type_layout.addWidget(self.text_watermark_radio)
+        watermark_type_layout.addWidget(self.image_watermark_radio)
+        watermark_layout.addRow('水印类型:', watermark_type_layout)
+        
         # 模板管理按钮
         template_layout = QHBoxLayout()
         save_template_btn = QPushButton("保存模板")
@@ -213,7 +238,49 @@ class ImageWatermarkTool(QMainWindow):
         self.watermark_input = QLineEdit()
         self.watermark_input.setPlaceholderText('请输入水印文本')
         self.watermark_input.textChanged.connect(self.on_watermark_text_changed)
-        watermark_layout.addRow('水印文本:', self.watermark_input)
+        
+        # 图片水印选择
+        self.watermark_image_button = QPushButton('选择水印图片')
+        self.watermark_image_button.clicked.connect(self.choose_watermark_image)
+        self.watermark_image_button.setEnabled(False)
+        self.watermark_image_label = QLabel('未选择图片')
+        image_watermark_layout = QHBoxLayout()
+        image_watermark_layout.addWidget(self.watermark_image_button)
+        image_watermark_layout.addWidget(self.watermark_image_label, 1)
+        self.text_watermark_layout = QHBoxLayout()
+        self.text_watermark_layout.addWidget(self.watermark_input)
+        watermark_layout.addRow('水印文本:', self.text_watermark_layout)
+        
+        # 添加图片水印布局
+        watermark_layout.addRow('水印图片:', image_watermark_layout)
+        
+        # 图片水印大小调节
+        self.watermark_image_size_slider = QSlider(Qt.Horizontal)
+        self.watermark_image_size_slider.setRange(5, 50)
+        self.watermark_image_size_slider.setValue(self.watermark_image_size_ratio)
+        self.watermark_image_size_slider.setTickPosition(QSlider.TicksBelow)
+        self.watermark_image_size_slider.setTickInterval(10)
+        self.watermark_image_size_slider.valueChanged.connect(self.on_watermark_image_size_changed)
+        self.watermark_image_size_slider.setEnabled(False)
+        self.watermark_image_size_label = QLabel(f'{self.watermark_image_size_ratio}%')
+        image_size_layout = QHBoxLayout()
+        image_size_layout.addWidget(self.watermark_image_size_slider)
+        image_size_layout.addWidget(self.watermark_image_size_label)
+        watermark_layout.addRow('图片大小:', image_size_layout)
+        
+        # 图片水印透明度调节
+        self.watermark_image_opacity_slider = QSlider(Qt.Horizontal)
+        self.watermark_image_opacity_slider.setRange(0, 255)
+        self.watermark_image_opacity_slider.setValue(self.watermark_image_opacity)
+        self.watermark_image_opacity_slider.setTickPosition(QSlider.TicksBelow)
+        self.watermark_image_opacity_slider.setTickInterval(51)
+        self.watermark_image_opacity_slider.valueChanged.connect(self.on_watermark_image_opacity_changed)
+        self.watermark_image_opacity_slider.setEnabled(False)
+        self.watermark_image_opacity_label = QLabel(f'{int(self.watermark_image_opacity / 255 * 100)}%')
+        image_opacity_layout = QHBoxLayout()
+        image_opacity_layout.addWidget(self.watermark_image_opacity_slider)
+        image_opacity_layout.addWidget(self.watermark_image_opacity_label)
+        watermark_layout.addRow('图片透明度:', image_opacity_layout)
         
         # 字体大小
         self.font_size_combo = QComboBox()
@@ -514,7 +581,11 @@ class ImageWatermarkTool(QMainWindow):
                 self.watermark_shadow,
                 self.watermark_stroke,
                 self.watermark_stroke_width,
-                self.watermark_stroke_color
+                self.watermark_stroke_color,
+                self.use_image_watermark,
+                self.watermark_image_path,
+                self.watermark_image_size_ratio,
+                self.watermark_image_opacity
             )
             
             # 检查是否有缓存的处理后图片
@@ -529,8 +600,8 @@ class ImageWatermarkTool(QMainWindow):
                 # 使用缓存的原始图片进行处理
                 image = self.original_image_cache[current_image_path].copy()
                 
-                # 如果有水印文本，应用水印
-                if self.watermark_text:
+                # 如果有水印文本或选择了图片水印，应用水印
+                if self.watermark_text or (self.use_image_watermark and self.watermark_image_path):
                     image = self.add_watermark_to_image(image)
                 
                 # 转换为QImage并缓存
@@ -674,84 +745,123 @@ class ImageWatermarkTool(QMainWindow):
         return result
     
     def add_watermark_to_image(self, image):
-        """向图片添加文本水印（高性能版本）"""
-        # 快速路径：如果水印文本为空，直接返回原图
-        if not self.watermark_text.strip():
+        """向图片添加水印（支持文本和图片，高性能版本）"""
+        # 快速路径：如果水印条件不满足，直接返回原图
+        if (not self.use_image_watermark and not self.watermark_text.strip()) or \
+           (self.use_image_watermark and not self.watermark_image_path):
             return image
-        
-        # 创建可绘制对象
-        draw = ImageDraw.Draw(image, 'RGBA')
         
         # 获取图片尺寸
         width, height = image.size
         
-        # 尝试加载字体（使用缓存优化）
-        font = self._get_font()
-        
-        if font is None:
-            # 如果无法加载字体，使用默认字体
-            font = ImageFont.load_default()
-        
-        # 计算文本尺寸
-        try:
-            # 兼容Pillow 9.0+的API变化
-            bbox = draw.textbbox((0, 0), self.watermark_text, font=font)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-        except:
-            # 旧版Pillow
+        # 根据水印类型执行不同的逻辑
+        if self.use_image_watermark:
+            # 图片水印逻辑
             try:
-                text_width, text_height = draw.textsize(self.watermark_text, font=font)
-            except:
-                # 降级为保守的默认值
-                text_width, text_height = 100, 50
-        
-        # 计算水印位置
-        pos_x = int(self.watermark_position[0] * width - text_width / 2)
-        pos_y = int(self.watermark_position[1] * height - text_height / 2)
-        
-        # 确保位置在图片范围内
-        pos_x = max(0, min(pos_x, width - text_width))
-        pos_y = max(0, min(pos_y, height - text_height))
-        
-        # 将颜色名称转换为RGB值
-        color_rgb = self.get_rgb_from_color(self.watermark_color)
-        
-        # 构建带透明度的颜色
-        fill_color = (*color_rgb, self.watermark_opacity)
-        
-        # 添加特效 - 优先级优化（减少不必要的处理）
-        if self.watermark_stroke:
-            # 添加描边 - 高性能版本
-            stroke_rgb = self.get_rgb_from_color(self.watermark_stroke_color)
-            stroke_color = (*stroke_rgb, self.watermark_opacity)
-            stroke_width = self.watermark_stroke_width
+                # 加载水印图片
+                watermark_img = Image.open(self.watermark_image_path).convert('RGBA')
+                
+                # 计算水印图片尺寸（基于原图的百分比）
+                new_width = int(width * self.watermark_image_size_ratio / 100)
+                new_height = int(watermark_img.height * (new_width / watermark_img.width))
+                
+                # 调整水印图片大小
+                watermark_img = watermark_img.resize((new_width, new_height), Image.LANCZOS)
+                
+                # 创建一个带有透明度的临时图像
+                temp_img = Image.new('RGBA', watermark_img.size)
+                for x in range(watermark_img.width):
+                    for y in range(watermark_img.height):
+                        r, g, b, a = watermark_img.getpixel((x, y))
+                        # 应用透明度
+                        new_a = int(a * self.watermark_image_opacity / 255)
+                        temp_img.putpixel((x, y), (r, g, b, new_a))
+                
+                # 计算水印位置
+                pos_x = int(self.watermark_position[0] * width - new_width / 2)
+                pos_y = int(self.watermark_position[1] * height - new_height / 2)
+                
+                # 确保位置在图片范围内
+                pos_x = max(0, min(pos_x, width - new_width))
+                pos_y = max(0, min(pos_y, height - new_height))
+                
+                # 将水印图片粘贴到原图上
+                image.paste(temp_img, (pos_x, pos_y), temp_img)
+            except Exception as e:
+                # 如果出现错误，记录日志但不中断程序
+                print(f"添加图片水印时出错: {str(e)}")
+        else:
+            # 文本水印逻辑（原有代码）
+            # 创建可绘制对象
+            draw = ImageDraw.Draw(image, 'RGBA')
             
-            # 基于文本尺寸的描边策略
-            if text_width < 100 or text_height < 50:
-                # 小文本：只绘制4个方向的描边，减少绘制次数
-                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    draw.text((pos_x + dx * stroke_width, pos_y + dy * stroke_width), 
-                              self.watermark_text, fill=stroke_color, font=font)
-            else:
-                # 大文本：使用简化的偏移算法
-                max_offset = min(stroke_width, 3)  # 限制最大偏移量以提高性能
-                for dx in range(-max_offset, max_offset + 1):
-                    for dy in range(-max_offset, max_offset + 1):
-                        # 只绘制边缘点，减少内部点的绘制
-                        if abs(dx) == max_offset or abs(dy) == max_offset:
-                            draw.text((pos_x + dx, pos_y + dy), self.watermark_text, 
-                                      fill=stroke_color, font=font)
-        
-        if self.watermark_shadow and not self.watermark_stroke:
-            # 只有在没有描边的情况下才添加阴影
-            shadow_offset = 2
-            shadow_color = (0, 0, 0, int(self.watermark_opacity * 0.5))
-            draw.text((pos_x + shadow_offset, pos_y + shadow_offset), self.watermark_text, 
-                      fill=shadow_color, font=font)
-        
-        # 添加主水印文本
-        draw.text((pos_x, pos_y), self.watermark_text, fill=fill_color, font=font)
+            # 尝试加载字体（使用缓存优化）
+            font = self._get_font()
+            
+            if font is None:
+                # 如果无法加载字体，使用默认字体
+                font = ImageFont.load_default()
+            
+            # 计算文本尺寸
+            try:
+                # 兼容Pillow 9.0+的API变化
+                bbox = draw.textbbox((0, 0), self.watermark_text, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+            except:
+                # 旧版Pillow
+                try:
+                    text_width, text_height = draw.textsize(self.watermark_text, font=font)
+                except:
+                    # 降级为保守的默认值
+                    text_width, text_height = 100, 50
+            
+            # 计算水印位置
+            pos_x = int(self.watermark_position[0] * width - text_width / 2)
+            pos_y = int(self.watermark_position[1] * height - text_height / 2)
+            
+            # 确保位置在图片范围内
+            pos_x = max(0, min(pos_x, width - text_width))
+            pos_y = max(0, min(pos_y, height - text_height))
+            
+            # 将颜色名称转换为RGB值
+            color_rgb = self.get_rgb_from_color(self.watermark_color)
+            
+            # 构建带透明度的颜色
+            fill_color = (*color_rgb, self.watermark_opacity)
+            
+            # 添加特效 - 优先级优化（减少不必要的处理）
+            if self.watermark_stroke:
+                # 添加描边 - 高性能版本
+                stroke_rgb = self.get_rgb_from_color(self.watermark_stroke_color)
+                stroke_color = (*stroke_rgb, self.watermark_opacity)
+                stroke_width = self.watermark_stroke_width
+                
+                # 基于文本尺寸的描边策略
+                if text_width < 100 or text_height < 50:
+                    # 小文本：只绘制4个方向的描边，减少绘制次数
+                    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                        draw.text((pos_x + dx * stroke_width, pos_y + dy * stroke_width), 
+                                  self.watermark_text, fill=stroke_color, font=font)
+                else:
+                    # 大文本：使用简化的偏移算法
+                    max_offset = min(stroke_width, 3)  # 限制最大偏移量以提高性能
+                    for dx in range(-max_offset, max_offset + 1):
+                        for dy in range(-max_offset, max_offset + 1):
+                            # 只绘制边缘点，减少内部点的绘制
+                            if abs(dx) == max_offset or abs(dy) == max_offset:
+                                draw.text((pos_x + dx, pos_y + dy), self.watermark_text, 
+                                          fill=stroke_color, font=font)
+            
+            if self.watermark_shadow and not self.watermark_stroke:
+                # 只有在没有描边的情况下才添加阴影
+                shadow_offset = 2
+                shadow_color = (0, 0, 0, int(self.watermark_opacity * 0.5))
+                draw.text((pos_x + shadow_offset, pos_y + shadow_offset), self.watermark_text, 
+                          fill=shadow_color, font=font)
+            
+            # 添加主水印文本
+            draw.text((pos_x, pos_y), self.watermark_text, fill=fill_color, font=font)
         
         return image
         
@@ -825,11 +935,6 @@ class ImageWatermarkTool(QMainWindow):
             self.cached_fonts[font_key] = font
         
         return font
-        
-        # 添加水印文本
-        draw.text((pos_x, pos_y), self.watermark_text, fill=fill_color, font=font)
-        
-        return image
     
     def get_rgb_from_color(self, color):
         """将颜色名称或代码转换为RGB值，确保颜色一致性"""
@@ -943,6 +1048,80 @@ class ImageWatermarkTool(QMainWindow):
         """描边宽度变化时更新"""
         self.watermark_stroke_width = value
         self.stroke_width_label.setText(str(value))
+        self.update_preview()
+        self.save_current_settings()
+        
+    def on_watermark_type_changed(self, checked, force_image_watermark=None):
+        """水印类型变化时更新
+        force_image_watermark: 可选参数，强制设置水印类型
+        """
+        if force_image_watermark is not None:
+            # 如果提供了强制参数，直接使用它
+            self.use_image_watermark = force_image_watermark
+        elif self.sender() == self.image_watermark_radio:
+            self.use_image_watermark = True
+        else:
+            self.use_image_watermark = False
+        
+        # 更新UI元素的可用性
+        self.text_watermark_layout.setEnabled(not self.use_image_watermark)
+        self.watermark_input.setEnabled(not self.use_image_watermark)  # 直接禁用水印文本输入框
+        self.font_size_combo.setEnabled(not self.use_image_watermark)
+        self.opacity_slider.setEnabled(not self.use_image_watermark)
+        self.font_combo.setEnabled(not self.use_image_watermark)
+        self.bold_checkbox.setEnabled(not self.use_image_watermark)
+        self.italic_checkbox.setEnabled(not self.use_image_watermark)
+        self.color_button.setEnabled(not self.use_image_watermark)
+        self.shadow_checkbox.setEnabled(not self.use_image_watermark)
+        self.stroke_checkbox.setEnabled(not self.use_image_watermark)
+        self.stroke_width_spin.setEnabled(not self.use_image_watermark and self.watermark_stroke)
+        self.stroke_color_button.setEnabled(not self.use_image_watermark and self.watermark_stroke)
+        
+        self.watermark_image_button.setEnabled(self.use_image_watermark)
+        self.watermark_image_size_slider.setEnabled(self.use_image_watermark)
+        self.watermark_image_opacity_slider.setEnabled(self.use_image_watermark)
+        
+        # 更新预览
+        self.update_preview()
+        self.save_current_settings()
+        
+    def choose_watermark_image(self):
+        """选择水印图片"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "选择水印图片", "", "PNG图片 (*.png);;所有图片 (*.png *.jpg *.jpeg)"
+        )
+        
+        if file_path:
+            try:
+                # 验证图片格式，确保支持透明度
+                with Image.open(file_path) as img:
+                    if img.mode != 'RGBA' and img.mode != 'LA':
+                        reply = QMessageBox.question(
+                            self, "图片格式提示", 
+                            "选择的图片没有透明通道。是否继续使用？",
+                            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                        )
+                        if reply != QMessageBox.Yes:
+                            return
+                
+                self.watermark_image_path = file_path
+                self.watermark_image_label.setText(os.path.basename(file_path))
+                self.update_preview()
+                self.save_current_settings()
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"无法加载图片：{str(e)}")
+                
+    def on_watermark_image_size_changed(self, value):
+        """水印图片大小变化时更新"""
+        self.watermark_image_size_ratio = value
+        self.watermark_image_size_label.setText(f'{value}%')
+        self.update_preview()
+        self.save_current_settings()
+        
+    def on_watermark_image_opacity_changed(self, value):
+        """水印图片透明度变化时更新"""
+        self.watermark_image_opacity = value
+        self.watermark_image_opacity_label.setText(f'{int(value / 255 * 100)}%')
         self.update_preview()
         self.save_current_settings()
         
@@ -1060,7 +1239,7 @@ class ImageWatermarkTool(QMainWindow):
                 image = Image.open(current_image_path)
                 
                 # 应用水印
-                if self.watermark_text:
+                if self.watermark_text or (self.use_image_watermark and self.watermark_image_path):
                     image = self.add_watermark_to_image(image)
                 
                 # 保存图片
@@ -1123,7 +1302,11 @@ class ImageWatermarkTool(QMainWindow):
                 "use_suffix": self.use_suffix,
                 "suffix_text": self.suffix_text,
                 "save_to_same_dir": self.save_to_same_dir,
-                "last_export_dir": self.last_export_dir
+                "last_export_dir": self.last_export_dir,
+                "use_image_watermark": self.use_image_watermark,
+                "watermark_image_path": self.watermark_image_path,
+                "watermark_image_size_ratio": self.watermark_image_size_ratio,
+                "watermark_image_opacity": self.watermark_image_opacity
             }
             
             # 保存到文件
@@ -1237,6 +1420,32 @@ class ImageWatermarkTool(QMainWindow):
                 
                 if "last_export_dir" in settings:
                     self.last_export_dir = settings["last_export_dir"]
+                    
+                # 图片水印设置
+                if "use_image_watermark" in settings:
+                    self.use_image_watermark = settings["use_image_watermark"]
+                    if hasattr(self, 'text_watermark_radio') and hasattr(self, 'image_watermark_radio'):
+                        if self.use_image_watermark:
+                            self.image_watermark_radio.setChecked(True)
+                        else:
+                            self.text_watermark_radio.setChecked(True)
+                    
+                if "watermark_image_path" in settings:
+                    self.watermark_image_path = settings["watermark_image_path"]
+                    if hasattr(self, 'watermark_image_label'):
+                        self.watermark_image_label.setText(os.path.basename(self.watermark_image_path) if self.watermark_image_path else "")
+                        
+                if "watermark_image_size_ratio" in settings:
+                    self.watermark_image_size_ratio = settings["watermark_image_size_ratio"]
+                    if hasattr(self, 'watermark_image_size_slider') and hasattr(self, 'watermark_image_size_label'):
+                        self.watermark_image_size_slider.setValue(self.watermark_image_size_ratio)
+                        self.watermark_image_size_label.setText(f'{self.watermark_image_size_ratio}%')
+                        
+                if "watermark_image_opacity" in settings:
+                    self.watermark_image_opacity = settings["watermark_image_opacity"]
+                    if hasattr(self, 'watermark_image_opacity_slider') and hasattr(self, 'watermark_image_opacity_label'):
+                        self.watermark_image_opacity_slider.setValue(self.watermark_image_opacity)
+                        self.watermark_image_opacity_label.setText(f'{int(self.watermark_image_opacity / 255 * 100)}%')
         except Exception as e:
             print(f"加载设置时出错: {e}")
             # 如果加载失败，使用默认设置
@@ -1271,7 +1480,11 @@ class ImageWatermarkTool(QMainWindow):
                     "export_quality": self.export_quality,
                     "use_suffix": self.use_suffix,
                     "suffix_text": self.suffix_text,
-                    "save_to_same_dir": self.save_to_same_dir
+                    "save_to_same_dir": self.save_to_same_dir,
+                    "use_image_watermark": self.use_image_watermark,
+                    "watermark_image_path": self.watermark_image_path,
+                    "watermark_image_size_ratio": self.watermark_image_size_ratio,
+                    "watermark_image_opacity": self.watermark_image_opacity
                 }
                 
                 # 生成模板文件名
@@ -1425,6 +1638,42 @@ class ImageWatermarkTool(QMainWindow):
                     if hasattr(self, 'stroke_color_button') and hasattr(self, 'stroke_color_label'):
                         self.stroke_color_button.setStyleSheet(f"background-color: {self.watermark_stroke_color}")
                         self.stroke_color_label.setText(self.watermark_stroke_color)
+                        
+                # 加载图片水印设置
+                if "use_image_watermark" in template:
+                    self.use_image_watermark = template["use_image_watermark"]
+                    if hasattr(self, 'text_watermark_radio') and hasattr(self, 'image_watermark_radio'):
+                        if self.use_image_watermark:
+                            self.image_watermark_radio.setChecked(True)
+                        else:
+                            self.text_watermark_radio.setChecked(True)
+                
+                if "watermark_image_path" in template:
+                    self.watermark_image_path = template["watermark_image_path"]
+                    if hasattr(self, 'watermark_image_label'):
+                        self.watermark_image_label.setText(os.path.basename(self.watermark_image_path) if self.watermark_image_path else "")
+                    # 清除图片缓存，强制重新加载图片
+                    if hasattr(self, 'processed_image_cache'):
+                        self.processed_image_cache.clear()
+                    if hasattr(self, 'render_cache'):
+                        self.render_cache.clear()
+                        
+                if "watermark_image_size_ratio" in template:
+                    self.watermark_image_size_ratio = template["watermark_image_size_ratio"]
+                    if hasattr(self, 'watermark_image_size_slider') and hasattr(self, 'watermark_image_size_label'):
+                        self.watermark_image_size_slider.setValue(self.watermark_image_size_ratio)
+                        self.watermark_image_size_label.setText(f'{self.watermark_image_size_ratio}%')
+                        
+                if "watermark_image_opacity" in template:
+                    self.watermark_image_opacity = template["watermark_image_opacity"]
+                    if hasattr(self, 'watermark_image_opacity_slider') and hasattr(self, 'watermark_image_opacity_label'):
+                        self.watermark_image_opacity_slider.setValue(self.watermark_image_opacity)
+                        self.watermark_image_opacity_label.setText(f'{int(self.watermark_image_opacity / 255 * 100)}%')
+                        
+                # 更新UI元素的可用性状态
+                if hasattr(self, 'on_watermark_type_changed'):
+                    # 手动触发UI更新，传入当前的水印类型
+                    self.on_watermark_type_changed(True, self.use_image_watermark)
                 
                 # 更新预览
                 self.update_preview()
@@ -1558,10 +1807,10 @@ class ImageWatermarkTool(QMainWindow):
                         if template.get('use_suffix', False):
                             details.append(f"后缀文本: {template.get('suffix_text', '')}")
                         details.append(f"保存到原目录: {'是' if template.get('save_to_same_dir', False) else '否'}")
-                         
-                QMessageBox.information(
-                    self, "模板详情", "\n".join(details)
-                )
+                          
+                        QMessageBox.information(
+                            self, "模板详情", "\n".join(details)
+                        )
         except Exception as e:
             QMessageBox.critical(self, "错误", f"管理模板时出错: {str(e)}")
             
