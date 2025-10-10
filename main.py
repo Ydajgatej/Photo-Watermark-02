@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import sys
+import math
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QLabel, QPushButton, QListWidget, QListWidgetItem, QFileDialog, 
@@ -33,6 +34,7 @@ class ImageWatermarkTool(QMainWindow):
         self.watermark_stroke = False  # 描边
         self.watermark_stroke_width = 1  # 描边宽度
         self.watermark_stroke_color = "black"  # 描边颜色
+        self.watermark_rotation = 0  # 新增：水印旋转角度
         
         # 图片水印相关变量
         self.use_image_watermark = False
@@ -50,6 +52,8 @@ class ImageWatermarkTool(QMainWindow):
         self.watermark_text = ""  # 清空水印文本
         self.use_image_watermark = False  # 关闭图片水印
         self.watermark_image_path = ""  # 清空水印图片路径
+        # 重置旋转角度为0
+        self.watermark_rotation = 0
         
         # 优化性能相关变量
         self.preview_timer = QTimer(self)  # 预览更新计时器
@@ -62,6 +66,10 @@ class ImageWatermarkTool(QMainWindow):
         self.original_image_cache = {}
         self.processed_image_cache = {}
         self.render_cache = {}  # 用于缓存渲染结果
+        
+        # 拖拽相关变量
+        self.is_dragging = False
+        self.drag_start_pos = (0, 0)
         
         # 水印预设位置（九宫格）
         self.position_presets = {
@@ -181,6 +189,10 @@ class ImageWatermarkTool(QMainWindow):
         self.preview_label.setAlignment(Qt.AlignCenter)
         self.preview_label.setStyleSheet('border: 1px solid #ccc;')
         self.preview_label.setMinimumSize(600, 400)
+        self.preview_label.setMouseTracking(True)  # 启用鼠标追踪
+        self.preview_label.mousePressEvent = self.on_preview_mouse_press  # 鼠标按下事件
+        self.preview_label.mouseMoveEvent = self.on_preview_mouse_move  # 鼠标移动事件
+        self.preview_label.mouseReleaseEvent = self.on_preview_mouse_release  # 鼠标释放事件
         center_layout.addWidget(self.preview_label)
         
         # 添加到主布局
@@ -330,10 +342,13 @@ class ImageWatermarkTool(QMainWindow):
         # 字体选择
         font_layout = QHBoxLayout()
         self.font_combo = QComboBox()
-        # 添加一些常用字体
-        common_fonts = ["simhei.ttf", "simsun.ttc", "msyh.ttc", "Arial.ttf", "Times.ttf", "Calibri.ttf"]
-        self.font_combo.addItems([os.path.splitext(font)[0] for font in common_fonts])
-        self.font_combo.setCurrentText("simhei")
+        # 使用系统已安装的字体填充下拉框
+        system_font_names = [os.path.splitext(font)[0] for font in self.system_fonts]
+        self.font_combo.addItems(system_font_names)
+        # 设置默认字体，如果simhei可用则使用它，否则使用第一个字体
+        default_font = "simhei" if "simhei" in system_font_names else (system_font_names[0] if system_font_names else "")
+        if default_font:
+            self.font_combo.setCurrentText(default_font)
         self.font_combo.currentTextChanged.connect(self.on_font_changed)
         font_layout.addWidget(self.font_combo)
         watermark_layout.addRow('字体:', font_layout)
@@ -369,6 +384,20 @@ class ImageWatermarkTool(QMainWindow):
         self.stroke_checkbox = QCheckBox('添加描边')
         self.stroke_checkbox.stateChanged.connect(self.on_stroke_toggled)
         effect_layout.addWidget(self.stroke_checkbox)
+        
+        # 旋转设置
+        rotation_layout = QHBoxLayout()
+        rotation_layout.addWidget(QLabel('旋转角度:'))
+        self.rotation_slider = QSlider(Qt.Horizontal)
+        self.rotation_slider.setRange(-180, 180)
+        self.rotation_slider.setValue(0)
+        self.rotation_slider.setTickPosition(QSlider.TicksBelow)
+        self.rotation_slider.setTickInterval(45)
+        self.rotation_slider.valueChanged.connect(self.on_rotation_changed)
+        self.rotation_label = QLabel('0°')
+        rotation_layout.addWidget(self.rotation_slider)
+        rotation_layout.addWidget(self.rotation_label)
+        effect_layout.addLayout(rotation_layout)
         
         stroke_width_layout = QHBoxLayout()
         stroke_width_layout.addWidget(QLabel('描边宽度:'))
@@ -582,6 +611,7 @@ class ImageWatermarkTool(QMainWindow):
                 self.watermark_stroke,
                 self.watermark_stroke_width,
                 self.watermark_stroke_color,
+                self.watermark_rotation,
                 self.use_image_watermark,
                 self.watermark_image_path,
                 self.watermark_image_size_ratio,
@@ -679,11 +709,10 @@ class ImageWatermarkTool(QMainWindow):
     def get_system_fonts(self):
         """获取系统已安装的字体列表（优化性能版本）"""
         # 使用缓存避免重复扫描
-        if hasattr(self, 'cached_system_fonts'):
+        if hasattr(self, 'cached_system_fonts') and hasattr(self, 'font_name_to_path'):
             return self.cached_system_fonts
         
         fonts = []
-        max_fonts = 200  # 限制字体总数，避免扫描过多文件
         
         # 尝试从常见的字体目录获取字体
         font_dirs = []
@@ -699,22 +728,40 @@ class ImageWatermarkTool(QMainWindow):
             # Linux/Unix系统
             font_dirs.append('/usr/share/fonts')
         
-        # 添加常用字体作为默认选项
+        # 添加常用字体作为默认选项，包括更多支持中文的字体
         common_fonts = [
             'Arial.ttf', 'Arial.ttc', 'times.ttf', 'times.ttc',
+            # 中文字体
             'simhei.ttf', 'simsun.ttc', 'msyh.ttc', 'msyhbd.ttc',
-            'calibri.ttf', 'verdana.ttf', 'tahoma.ttf'
+            'msyhl.ttc', 'msyh_boot.ttf', 'msjh.ttc', 'msjhbd.ttc',
+            'msjh_boot.ttf', 'simsunb.ttf', 'simkai.ttf', 'simli.ttf',
+            'simfang.ttf', 'simyou.ttf', 'STSong.ttf', 'STZhongsong.ttf',
+            'STKaiti.ttf', 'STFangsong.ttf', 'STXihei.ttf', 'STCaiyun.ttf',
+            'STHupo.ttf', 'STLiti.ttf', 'STXingkai.ttf', 'STXingkai.ttf',
+            'STXingkai_boot.ttf',
+            # 其他常用字体
+            'calibri.ttf', 'verdana.ttf', 'tahoma.ttf', 'courier.ttf',
+            'comic.ttf', 'impact.ttf', 'georgia.ttf'
         ]
+        
+        # 已知支持中文的字体名称列表
+        chinese_support_fonts = {
+            'simhei.ttf', 'simsun.ttc', 'simsunb.ttf',
+            'msyh.ttc', 'msyhbd.ttc', 'msyhl.ttc', 'msyh_boot.ttf',
+            'msjh.ttc', 'msjhbd.ttc', 'msjh_boot.ttf',
+            'simkai.ttf', 'simli.ttf', 'simfang.ttf', 'simyou.ttf',
+            'stsong.ttf', 'stzhongsong.ttf', 'stkaiti.ttf', 'stfangsong.ttf',
+            'stxihei.ttf', 'stcaiyun.ttf', 'sthupo.ttf', 'stliti.ttf',
+            'stxingkai.ttf', 'stxingkai_boot.ttf'
+        }
         
         for font_dir in font_dirs:
             font_dir = os.path.expanduser(font_dir)
             if os.path.exists(font_dir):
                 try:
                     # 使用更快的os.listdir代替glob.glob
-                    items = os.listdir(font_dir)[:300]  # 限制扫描文件数量
+                    items = os.listdir(font_dir)
                     for item in items:
-                        if len(fonts) >= max_fonts:
-                            break
                         
                         # 检查文件扩展名
                         ext = os.path.splitext(item)[1].lower()[1:]  # 获取不带点的扩展名
@@ -726,7 +773,7 @@ class ImageWatermarkTool(QMainWindow):
         # 添加常用字体到结果中（如果它们不存在）
         for common_font in common_fonts:
             common_font_path = os.path.join(font_dirs[0], common_font) if font_dirs else common_font
-            if common_font_path not in fonts and len(fonts) < max_fonts:
+            if common_font_path not in fonts:
                 fonts.append(common_font_path)
         
         # 去重并保留顺序
@@ -738,8 +785,26 @@ class ImageWatermarkTool(QMainWindow):
                 seen.add(font_name)
                 unique_fonts.append(font_path)
         
+        # 创建字体名称到路径的映射
+        self.font_name_to_path = {}
+        result = []
+        
+        for font_path in unique_fonts:
+            font_name = os.path.basename(font_path)
+            # 检查是否支持中文
+            font_lower = font_name.lower()
+            supports_chinese = font_lower in chinese_support_fonts
+            
+            # 对于不支持中文的字体，添加标注
+            display_name = font_name
+            if not supports_chinese:
+                display_name = f"{font_name} [不支持中文]"
+            
+            result.append(display_name)
+            # 保存字体名称到完整路径的映射（使用原始名称作为键）
+            self.font_name_to_path[display_name] = font_path
+        
         # 缓存结果
-        result = [os.path.basename(font) for font in unique_fonts]
         self.cached_system_fonts = result
         
         return result
@@ -768,6 +833,19 @@ class ImageWatermarkTool(QMainWindow):
                 # 调整水印图片大小
                 watermark_img = watermark_img.resize((new_width, new_height), Image.LANCZOS)
                 
+                # 应用旋转（如果需要）
+                if self.watermark_rotation != 0:
+                    # 计算旋转后的图像大小（确保不裁剪）
+                    radians = math.radians(self.watermark_rotation)
+                    rotated_width = int(abs(watermark_img.width * math.cos(radians)) + abs(watermark_img.height * math.sin(radians)))
+                    rotated_height = int(abs(watermark_img.width * math.sin(radians)) + abs(watermark_img.height * math.cos(radians)))
+                    
+                    # 旋转图像
+                    watermark_img = watermark_img.rotate(self.watermark_rotation, expand=True, resample=Image.BICUBIC)
+                    
+                    # 调整后的尺寸可能变化，更新尺寸变量
+                    new_width, new_height = watermark_img.size
+                
                 # 创建一个带有透明度的临时图像
                 temp_img = Image.new('RGBA', watermark_img.size)
                 for x in range(watermark_img.width):
@@ -791,82 +869,151 @@ class ImageWatermarkTool(QMainWindow):
                 # 如果出现错误，记录日志但不中断程序
                 print(f"添加图片水印时出错: {str(e)}")
         else:
-            # 文本水印逻辑（原有代码）
-            # 创建可绘制对象
-            draw = ImageDraw.Draw(image, 'RGBA')
-            
-            # 尝试加载字体（使用缓存优化）
-            font = self._get_font()
-            
-            if font is None:
-                # 如果无法加载字体，使用默认字体
-                font = ImageFont.load_default()
-            
-            # 计算文本尺寸
+            # 文本水印逻辑
             try:
-                # 兼容Pillow 9.0+的API变化
-                bbox = draw.textbbox((0, 0), self.watermark_text, font=font)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
-            except:
-                # 旧版Pillow
-                try:
-                    text_width, text_height = draw.textsize(self.watermark_text, font=font)
-                except:
-                    # 降级为保守的默认值
-                    text_width, text_height = 100, 50
-            
-            # 计算水印位置
-            pos_x = int(self.watermark_position[0] * width - text_width / 2)
-            pos_y = int(self.watermark_position[1] * height - text_height / 2)
-            
-            # 确保位置在图片范围内
-            pos_x = max(0, min(pos_x, width - text_width))
-            pos_y = max(0, min(pos_y, height - text_height))
-            
-            # 将颜色名称转换为RGB值
-            color_rgb = self.get_rgb_from_color(self.watermark_color)
-            
-            # 构建带透明度的颜色
-            fill_color = (*color_rgb, self.watermark_opacity)
-            
-            # 添加特效 - 优先级优化（减少不必要的处理）
-            if self.watermark_stroke:
-                # 添加描边 - 高性能版本
-                stroke_rgb = self.get_rgb_from_color(self.watermark_stroke_color)
-                stroke_color = (*stroke_rgb, self.watermark_opacity)
-                stroke_width = self.watermark_stroke_width
+                # 尝试加载字体（使用缓存优化）
+                font = self._get_font()
                 
-                # 基于文本尺寸的描边策略
-                if text_width < 100 or text_height < 50:
-                    # 小文本：只绘制4个方向的描边，减少绘制次数
-                    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                        draw.text((pos_x + dx * stroke_width, pos_y + dy * stroke_width), 
-                                  self.watermark_text, fill=stroke_color, font=font)
+                if font is None:
+                    # 如果无法加载字体，使用默认字体
+                    font = ImageFont.load_default()
+                
+                # 计算文本尺寸
+                try:
+                    # 兼容Pillow 9.0+的API变化
+                    bbox = ImageDraw.Draw(Image.new('RGBA', (1, 1))).textbbox((0, 0), self.watermark_text, font=font)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+                except:
+                    # 旧版Pillow
+                    try:
+                        text_width, text_height = ImageDraw.Draw(Image.new('RGBA', (1, 1))).textsize(self.watermark_text, font=font)
+                    except:
+                        # 降级为保守的默认值
+                        text_width, text_height = 100, 50
+                
+                # 如果需要旋转，创建一个足够大的临时图像来容纳旋转后的文本
+                if self.watermark_rotation != 0:
+                    # 创建一个足够大的临时图像来容纳原始文本
+                    temp_img = Image.new('RGBA', (text_width + 40, text_height + 40), (255, 255, 255, 0))
+                    draw = ImageDraw.Draw(temp_img, 'RGBA')
+                    
+                    # 将颜色名称转换为RGB值
+                    color_rgb = self.get_rgb_from_color(self.watermark_color)
+                    
+                    # 构建带透明度的颜色
+                    fill_color = (*color_rgb, self.watermark_opacity)
+                    
+                    # 计算文本在临时图像中的位置（居中）
+                    temp_pos_x = (temp_img.width - text_width) // 2
+                    temp_pos_y = (temp_img.height - text_height) // 2
+                    
+                    # 添加特效和文本
+                    if self.watermark_stroke:
+                        # 添加描边
+                        stroke_rgb = self.get_rgb_from_color(self.watermark_stroke_color)
+                        stroke_color = (*stroke_rgb, self.watermark_opacity)
+                        stroke_width = self.watermark_stroke_width
+                        
+                        # 基于文本尺寸的描边策略
+                        if text_width < 100 or text_height < 50:
+                            # 小文本：只绘制4个方向的描边
+                            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                                draw.text((temp_pos_x + dx * stroke_width, temp_pos_y + dy * stroke_width), 
+                                          self.watermark_text, fill=stroke_color, font=font)
+                        else:
+                            # 大文本：使用简化的偏移算法
+                            max_offset = min(stroke_width, 3)
+                            for dx in range(-max_offset, max_offset + 1):
+                                for dy in range(-max_offset, max_offset + 1):
+                                    if abs(dx) == max_offset or abs(dy) == max_offset:
+                                        draw.text((temp_pos_x + dx, temp_pos_y + dy), self.watermark_text, 
+                                                  fill=stroke_color, font=font)
+                    
+                    if self.watermark_shadow and not self.watermark_stroke:
+                        # 添加阴影
+                        shadow_offset = 2
+                        shadow_color = (0, 0, 0, int(self.watermark_opacity * 0.5))
+                        draw.text((temp_pos_x + shadow_offset, temp_pos_y + shadow_offset), self.watermark_text, 
+                                  fill=shadow_color, font=font)
+                    
+                    # 添加主水印文本
+                    draw.text((temp_pos_x, temp_pos_y), self.watermark_text, fill=fill_color, font=font)
+                    
+                    # 旋转文本图像，expand=True确保旋转后图像大小足够容纳整个文本
+                    temp_img = temp_img.rotate(self.watermark_rotation, expand=True, resample=Image.BICUBIC)
+                    
+                    # 计算旋转后图像的中心点位置
+                    rotated_width, rotated_height = temp_img.size
+                    
+                    # 计算水印在原图中的位置
+                    pos_x = int(self.watermark_position[0] * width - rotated_width / 2)
+                    pos_y = int(self.watermark_position[1] * height - rotated_height / 2)
+                    
+                    # 确保位置在图片范围内
+                    pos_x = max(0, min(pos_x, width - rotated_width))
+                    pos_y = max(0, min(pos_y, height - rotated_height))
+                    
+                    # 将旋转后的文本图像粘贴到原图上
+                    image.paste(temp_img, (pos_x, pos_y), temp_img)
                 else:
-                    # 大文本：使用简化的偏移算法
-                    max_offset = min(stroke_width, 3)  # 限制最大偏移量以提高性能
-                    for dx in range(-max_offset, max_offset + 1):
-                        for dy in range(-max_offset, max_offset + 1):
-                            # 只绘制边缘点，减少内部点的绘制
-                            if abs(dx) == max_offset or abs(dy) == max_offset:
-                                draw.text((pos_x + dx, pos_y + dy), self.watermark_text, 
-                                          fill=stroke_color, font=font)
-            
-            if self.watermark_shadow and not self.watermark_stroke:
-                # 只有在没有描边的情况下才添加阴影
-                shadow_offset = 2
-                shadow_color = (0, 0, 0, int(self.watermark_opacity * 0.5))
-                draw.text((pos_x + shadow_offset, pos_y + shadow_offset), self.watermark_text, 
-                          fill=shadow_color, font=font)
-            
-            # 添加主水印文本
-            draw.text((pos_x, pos_y), self.watermark_text, fill=fill_color, font=font)
+                    # 不旋转的情况，直接在原图上绘制
+                    draw = ImageDraw.Draw(image, 'RGBA')
+                    
+                    # 计算水印位置
+                    pos_x = int(self.watermark_position[0] * width - text_width / 2)
+                    pos_y = int(self.watermark_position[1] * height - text_height / 2)
+                    
+                    # 确保位置在图片范围内
+                    pos_x = max(0, min(pos_x, width - text_width))
+                    pos_y = max(0, min(pos_y, height - text_height))
+                    
+                    # 将颜色名称转换为RGB值
+                    color_rgb = self.get_rgb_from_color(self.watermark_color)
+                    
+                    # 构建带透明度的颜色
+                    fill_color = (*color_rgb, self.watermark_opacity)
+                    
+                    # 添加特效 - 优先级优化
+                    if self.watermark_stroke:
+                        # 添加描边 - 高性能版本
+                        stroke_rgb = self.get_rgb_from_color(self.watermark_stroke_color)
+                        stroke_color = (*stroke_rgb, self.watermark_opacity)
+                        stroke_width = self.watermark_stroke_width
+                        
+                        # 基于文本尺寸的描边策略
+                        if text_width < 100 or text_height < 50:
+                            # 小文本：只绘制4个方向的描边
+                            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                                draw.text((pos_x + dx * stroke_width, pos_y + dy * stroke_width), 
+                                          self.watermark_text, fill=stroke_color, font=font)
+                        else:
+                            # 大文本：使用简化的偏移算法
+                            max_offset = min(stroke_width, 3)  # 限制最大偏移量以提高性能
+                            for dx in range(-max_offset, max_offset + 1):
+                                for dy in range(-max_offset, max_offset + 1):
+                                    # 只绘制边缘点，减少内部点的绘制
+                                    if abs(dx) == max_offset or abs(dy) == max_offset:
+                                        draw.text((pos_x + dx, pos_y + dy), self.watermark_text, 
+                                                  fill=stroke_color, font=font)
+                    
+                    if self.watermark_shadow and not self.watermark_stroke:
+                        # 只有在没有描边的情况下才添加阴影
+                        shadow_offset = 2
+                        shadow_color = (0, 0, 0, int(self.watermark_opacity * 0.5))
+                        draw.text((pos_x + shadow_offset, pos_y + shadow_offset), self.watermark_text, 
+                                  fill=shadow_color, font=font)
+                    
+                    # 添加主水印文本
+                    draw.text((pos_x, pos_y), self.watermark_text, fill=fill_color, font=font)
+            except Exception as e:
+                # 如果出现错误，记录日志但不中断程序
+                print(f"添加文本水印时出错: {str(e)}")
         
         return image
         
     def _get_font(self):
-        """获取字体（高性能版本，带缓存优化）"""
+        """获取字体（高性能版本，带缓存优化，增强中文显示支持）"""
         # 生成字体缓存键
         font_key = (
             self.watermark_font,
@@ -879,60 +1026,134 @@ class ImageWatermarkTool(QMainWindow):
         if font_key in self.cached_fonts:
             return self.cached_fonts[font_key]
         
-        # 特殊处理常见字体，确保正确加载
-        common_fonts = {
-            'times': 'times.ttf',
-            'times new roman': 'times.ttf',
-            'calibri': 'calibri.ttf',
-            'arial': 'arial.ttf',
-            'courier': 'cour.ttf',
-            'verdana': 'verdana.ttf',
-            'tahoma': 'tahoma.ttf',
-            'comic sans ms': 'comic.ttf',
-            'impact': 'impact.ttf',
-            'georgia': 'georgia.ttf',
-            'palatino': 'pala.ttf',
-            'bookman': 'bookman.ttf',
-            'century': 'century.ttf',
-            'simhei': 'simhei.ttf',
-            'simsun': 'simsun.ttc',
-            'msyh': 'msyh.ttc'
-        }
-        
-        font_path = self.watermark_font
+        font_path = None
         
         try:
-            # 检查是否有完整路径，如果没有则尝试在系统字体中查找
-            if not os.path.isfile(font_path):
-                # 先尝试在系统字体目录中直接查找
+            # 优先使用字体名称到路径的映射（最可靠的方法）
+            if hasattr(self, 'font_name_to_path') and self.watermark_font in self.font_name_to_path:
+                font_path = self.font_name_to_path[self.watermark_font]
+            else:
+                # 处理带标注的字体名称，提取原始字体名
+                original_font_name = self.watermark_font
+                if '[' in self.watermark_font:
+                    # 移除标注部分
+                    original_font_name = self.watermark_font.split('[')[0].strip()
+                
+                # 特殊处理常见字体，确保正确加载
+                # 增加更多中文字体支持
+                common_fonts = {
+                    'times': 'times.ttf',
+                    'times new roman': 'times.ttf',
+                    'calibri': 'calibri.ttf',
+                    'arial': 'arial.ttf',
+                    'courier': 'cour.ttf',
+                    'verdana': 'verdana.ttf',
+                    'tahoma': 'tahoma.ttf',
+                    'comic sans ms': 'comic.ttf',
+                    'impact': 'impact.ttf',
+                    'georgia': 'georgia.ttf',
+                    'palatino': 'pala.ttf',
+                    'bookman': 'bookman.ttf',
+                    'century': 'century.ttf',
+                    'simhei': 'simhei.ttf',
+                    'simsun': 'simsun.ttc',
+                    'msyh': 'msyh.ttc',
+                    'msyhbd': 'msyhbd.ttc',
+                    'microsoft yahei': 'msyh.ttc',
+                    'microsoft yahei bold': 'msyhbd.ttc',
+                    '微软雅黑': 'msyh.ttc',
+                    '微软雅黑粗体': 'msyhbd.ttc',
+                    '黑体': 'simhei.ttf',
+                    '宋体': 'simsun.ttc',
+                    'simsun': 'simsun.ttc'
+                }
+                
+                # 尝试常见字体映射
+                font_lower = original_font_name.lower()
                 system_font_dir = r'C:\Windows\Fonts'
-                if os.path.exists(system_font_dir):
-                    # 转换为小写以进行不区分大小写的匹配
-                    font_lower = font_path.lower()
-                    
-                    # 首先检查是否是常见字体（快速路径）
-                    if font_lower in common_fonts:
-                        candidate = os.path.join(system_font_dir, common_fonts[font_lower])
-                        if os.path.isfile(candidate):
+                
+                # 检查水印文本是否包含中文
+                has_chinese_text = False
+                if hasattr(self, 'watermark_text') and self.watermark_text:
+                    has_chinese_text = any('\u4e00-\u9fff' in char.encode().decode('unicode-escape') for char in self.watermark_text)
+                
+                # 检查字体名称是否包含中文
+                has_chinese_font_name = any('\u4e00-\u9fff' in char.encode().decode('unicode-escape') for char in self.watermark_font)
+                
+                # 如果水印文本包含中文，或者字体名称包含中文，或者找不到指定字体且是常用中文字体，优先使用中文字体
+                if has_chinese_text or has_chinese_font_name or (not font_lower in common_fonts and not os.path.isfile(self.watermark_font)):
+                    # 优先尝试中文字体
+                    for chinese_font in ['simhei.ttf', 'msyh.ttc', 'simsun.ttc']:
+                        candidate = os.path.join(system_font_dir, chinese_font)
+                        if os.path.exists(system_font_dir) and os.path.isfile(candidate):
                             font_path = candidate
+                            break
+                
+                # 如果还没找到，尝试常见字体映射
+                if not font_path and font_lower in common_fonts and os.path.exists(system_font_dir):
+                    candidate = os.path.join(system_font_dir, common_fonts[font_lower])
+                    if os.path.isfile(candidate):
+                        font_path = candidate
+                
+                # 如果仍然没有找到，尝试构建完整路径
+                if not font_path:
+                    # 检查是否已经是完整路径
+                    if os.path.isfile(original_font_name):
+                        font_path = original_font_name
                     else:
-                        # 不是常见字体，尝试直接匹配字体文件名（简化逻辑）
-                        font_file = font_path
-                        if not any(font_file.lower().endswith(ext) for ext in ['.ttf', '.ttc', '.otf']):
-                            # 只尝试.ttf扩展名作为主要选项
-                            candidate = os.path.join(system_font_dir, f'{font_file}.ttf')
-                            if os.path.isfile(candidate):
-                                font_path = candidate
+                        # 尝试在系统字体目录中查找
+                        if os.path.exists(system_font_dir):
+                            # 尝试添加常见扩展名
+                            font_file = original_font_name
+                            if not any(font_file.lower().endswith(ext) for ext in ['.ttf', '.ttc', '.otf']):
+                                for ext in ['.ttf', '.ttc', '.otf']:
+                                    candidate = os.path.join(system_font_dir, f'{font_file}{ext}')
+                                    if os.path.isfile(candidate):
+                                        font_path = candidate
+                                        break
             
-            # 尝试加载字体
-            font = ImageFont.truetype(font_path, self.watermark_font_size)
+            # 如果找到了字体路径，尝试加载
+            if font_path and os.path.isfile(font_path):
+                # 确保使用支持中文的字体加载方式
+                font = ImageFont.truetype(font_path, self.watermark_font_size, encoding="utf-8")
+            else:
+                # 如果没有找到字体路径，尝试让PIL自动查找
+                try:
+                    font = ImageFont.truetype(original_font_name, self.watermark_font_size, encoding="utf-8")
+                except:
+                    # 回退到不指定encoding的方式
+                    font = ImageFont.truetype(original_font_name, self.watermark_font_size)
             
             # 缓存成功加载的字体
             self.cached_fonts[font_key] = font
-        except Exception:
-            # 发生任何异常时，直接使用默认字体
-            font = ImageFont.load_default()
-            self.cached_fonts[font_key] = font
+        except Exception as e:
+            print(f"加载字体时出错: {str(e)}")
+            # 如果所有尝试都失败，强制使用中文字体
+            try:
+                # 优先尝试中文字体作为后备
+                fallback_fonts = ['simhei.ttf', 'msyh.ttc', 'simsun.ttc', 'Arial.ttf']
+                fallback_font = None
+                
+                system_font_dir = r'C:\Windows\Fonts'
+                if os.path.exists(system_font_dir):
+                    for fb_font in fallback_fonts:
+                        fb_path = os.path.join(system_font_dir, fb_font)
+                        if os.path.isfile(fb_path):
+                            fallback_font = fb_path
+                            break
+                
+                if fallback_font:
+                    font = ImageFont.truetype(fallback_font, self.watermark_font_size, encoding="utf-8")
+                else:
+                    # 最后使用PIL默认字体
+                    font = ImageFont.load_default()
+                
+                self.cached_fonts[font_key] = font
+            except Exception as fallback_error:
+                print(f"加载后备字体时出错: {str(fallback_error)}")
+                # 万不得已的情况
+                font = ImageFont.load_default()
+                self.cached_fonts[font_key] = font
         
         return font
     
@@ -1050,6 +1271,18 @@ class ImageWatermarkTool(QMainWindow):
         self.stroke_width_label.setText(str(value))
         self.update_preview()
         self.save_current_settings()
+    
+    def on_rotation_changed(self, value):
+        """旋转角度变化时更新"""
+        self.watermark_rotation = value
+        self.rotation_label.setText(f'{value}°')
+        self.update_preview()
+        self.save_current_settings()
+        
+    def on_watermark_text_changed(self, text):
+        """水印文本变化时更新"""
+        self.watermark_text = text
+        self.update_preview()
         
     def on_watermark_type_changed(self, checked, force_image_watermark=None):
         """水印类型变化时更新
@@ -1076,6 +1309,9 @@ class ImageWatermarkTool(QMainWindow):
         self.stroke_checkbox.setEnabled(not self.use_image_watermark)
         self.stroke_width_spin.setEnabled(not self.use_image_watermark and self.watermark_stroke)
         self.stroke_color_button.setEnabled(not self.use_image_watermark and self.watermark_stroke)
+        # 旋转控件在两种水印模式下都应可用
+        self.rotation_slider.setEnabled(True)
+        self.rotation_label.setEnabled(True)
         
         self.watermark_image_button.setEnabled(self.use_image_watermark)
         self.watermark_image_size_slider.setEnabled(self.use_image_watermark)
@@ -1103,6 +1339,13 @@ class ImageWatermarkTool(QMainWindow):
                         )
                         if reply != QMessageBox.Yes:
                             return
+                
+                # 明确设置为图片水印模式
+                self.use_image_watermark = True
+                # 确保旋转角度为0
+                self.watermark_rotation = 0
+                self.rotation_slider.setValue(0)
+                self.rotation_label.setText('0°')
                 
                 self.watermark_image_path = file_path
                 self.watermark_image_label.setText(os.path.basename(file_path))
@@ -1276,6 +1519,75 @@ class ImageWatermarkTool(QMainWindow):
         super().resizeEvent(event)
         if 0 <= self.current_image_index < len(self.image_list):
             self.update_preview()
+    
+    def on_preview_mouse_press(self, event):
+        """处理预览区域的鼠标按下事件，开始拖拽水印"""
+        if 0 <= self.current_image_index < len(self.image_list) and (self.watermark_text or (self.use_image_watermark and self.watermark_image_path)):
+            self.is_dragging = True
+            self.drag_start_pos = (event.pos().x(), event.pos().y())
+            
+            # 临时关闭鼠标指针自动隐藏，确保拖拽过程中可见
+            self.setCursor(Qt.ClosedHandCursor)
+    
+    def on_preview_mouse_move(self, event):
+        """处理预览区域的鼠标移动事件，更新水印位置"""
+        if self.is_dragging:
+            # 计算鼠标移动距离
+            dx = event.pos().x() - self.drag_start_pos[0]
+            dy = event.pos().y() - self.drag_start_pos[1]
+            
+            # 更新起始位置，为下一次移动做准备
+            self.drag_start_pos = (event.pos().x(), event.pos().y())
+            
+            # 转换为相对坐标更新
+            if hasattr(self, 'preview_label') and not self.preview_label.pixmap().isNull():
+                # 获取预览图的实际尺寸
+                pixmap_size = self.preview_label.pixmap().size()
+                preview_rect = self.preview_label.rect()
+                
+                # 计算图片在预览标签中的位置（居中显示）
+                img_x = (preview_rect.width() - pixmap_size.width()) // 2
+                img_y = (preview_rect.height() - pixmap_size.height()) // 2
+                
+                # 检查鼠标是否在图片范围内
+                if (img_x <= event.pos().x() < img_x + pixmap_size.width() and 
+                    img_y <= event.pos().y() < img_y + pixmap_size.height()):
+                    
+                    # 获取当前图片的原始尺寸
+                    current_image_path = self.image_list[self.current_image_index]
+                    if current_image_path in self.original_image_cache:
+                        orig_width, orig_height = self.original_image_cache[current_image_path].size
+                    else:
+                        # 如果缓存中没有，直接加载图片获取尺寸
+                        with Image.open(current_image_path) as img:
+                            orig_width, orig_height = img.size
+                    
+                    # 计算移动距离对应的相对坐标变化
+                    rel_dx = dx / pixmap_size.width()
+                    rel_dy = dy / pixmap_size.height()
+                    
+                    # 更新水印位置
+                    new_x = self.watermark_position[0] + rel_dx
+                    new_y = self.watermark_position[1] + rel_dy
+                    
+                    # 确保水印位置在有效范围内 (0-1)
+                    new_x = max(0, min(new_x, 1))
+                    new_y = max(0, min(new_y, 1))
+                    
+                    # 更新水印位置
+                    self.watermark_position = (new_x, new_y)
+                    
+                    # 更新预览
+                    self.update_preview()
+    
+    def on_preview_mouse_release(self, event):
+        """处理预览区域的鼠标释放事件，结束拖拽"""
+        if self.is_dragging:
+            self.is_dragging = False
+            # 恢复默认鼠标指针
+            self.unsetCursor()
+            # 保存当前设置
+            self.save_current_settings()
             
     def save_current_settings(self):
         """保存当前设置到文件"""
@@ -1306,7 +1618,8 @@ class ImageWatermarkTool(QMainWindow):
                 "use_image_watermark": self.use_image_watermark,
                 "watermark_image_path": self.watermark_image_path,
                 "watermark_image_size_ratio": self.watermark_image_size_ratio,
-                "watermark_image_opacity": self.watermark_image_opacity
+                "watermark_image_opacity": self.watermark_image_opacity,
+                "watermark_rotation": self.watermark_rotation
             }
             
             # 保存到文件
@@ -1446,6 +1759,12 @@ class ImageWatermarkTool(QMainWindow):
                     if hasattr(self, 'watermark_image_opacity_slider') and hasattr(self, 'watermark_image_opacity_label'):
                         self.watermark_image_opacity_slider.setValue(self.watermark_image_opacity)
                         self.watermark_image_opacity_label.setText(f'{int(self.watermark_image_opacity / 255 * 100)}%')
+                        
+                if "watermark_rotation" in settings:
+                    self.watermark_rotation = settings["watermark_rotation"]
+                    if hasattr(self, 'rotation_slider') and hasattr(self, 'rotation_label'):
+                        self.rotation_slider.setValue(self.watermark_rotation)
+                        self.rotation_label.setText(f'{self.watermark_rotation}°')
         except Exception as e:
             print(f"加载设置时出错: {e}")
             # 如果加载失败，使用默认设置
@@ -1463,29 +1782,30 @@ class ImageWatermarkTool(QMainWindow):
             if ok and template_name.strip():
                 # 准备模板数据
                 template = {
-                    "name": template_name,
-                    "watermark_text": self.watermark_text,
-                    "watermark_position": self.watermark_position,
-                    "watermark_font_size": self.watermark_font_size,
-                    "watermark_opacity": self.watermark_opacity,
-                    "watermark_font": self.watermark_font,
-                    "watermark_bold": self.watermark_bold,
-                    "watermark_italic": self.watermark_italic,
-                    "watermark_color": self.watermark_color,
-                    "watermark_shadow": self.watermark_shadow,
-                    "watermark_stroke": self.watermark_stroke,
-                    "watermark_stroke_width": self.watermark_stroke_width,
-                    "watermark_stroke_color": self.watermark_stroke_color,
-                    "export_format": self.export_format,
-                    "export_quality": self.export_quality,
-                    "use_suffix": self.use_suffix,
-                    "suffix_text": self.suffix_text,
-                    "save_to_same_dir": self.save_to_same_dir,
-                    "use_image_watermark": self.use_image_watermark,
-                    "watermark_image_path": self.watermark_image_path,
-                    "watermark_image_size_ratio": self.watermark_image_size_ratio,
-                    "watermark_image_opacity": self.watermark_image_opacity
-                }
+                "name": template_name,
+                "watermark_text": self.watermark_text,
+                "watermark_position": self.watermark_position,
+                "watermark_font_size": self.watermark_font_size,
+                "watermark_opacity": self.watermark_opacity,
+                "watermark_font": self.watermark_font,
+                "watermark_bold": self.watermark_bold,
+                "watermark_italic": self.watermark_italic,
+                "watermark_color": self.watermark_color,
+                "watermark_shadow": self.watermark_shadow,
+                "watermark_stroke": self.watermark_stroke,
+                "watermark_stroke_width": self.watermark_stroke_width,
+                "watermark_stroke_color": self.watermark_stroke_color,
+                "watermark_rotation": self.watermark_rotation,
+                "export_format": self.export_format,
+                "export_quality": self.export_quality,
+                "use_suffix": self.use_suffix,
+                "suffix_text": self.suffix_text,
+                "save_to_same_dir": self.save_to_same_dir,
+                "use_image_watermark": self.use_image_watermark,
+                "watermark_image_path": self.watermark_image_path,
+                "watermark_image_size_ratio": self.watermark_image_size_ratio,
+                "watermark_image_opacity": self.watermark_image_opacity
+            }
                 
                 # 生成模板文件名
                 template_filename = f"template_{template_name.replace(' ', '_')}.json"
@@ -1597,7 +1917,8 @@ class ImageWatermarkTool(QMainWindow):
                 # 加载其他水印设置参数
                 if "watermark_font" in template:
                     self.watermark_font = template["watermark_font"]
-                    font_name = os.path.splitext(self.watermark_font)[0]
+                    # 保持字体名称一致，不删除扩展名
+                    font_name = self.watermark_font
                     index = self.font_combo.findText(font_name)
                     if index >= 0:
                         self.font_combo.setCurrentIndex(index)
@@ -1638,6 +1959,12 @@ class ImageWatermarkTool(QMainWindow):
                     if hasattr(self, 'stroke_color_button') and hasattr(self, 'stroke_color_label'):
                         self.stroke_color_button.setStyleSheet(f"background-color: {self.watermark_stroke_color}")
                         self.stroke_color_label.setText(self.watermark_stroke_color)
+                        
+                if "watermark_rotation" in template:
+                    self.watermark_rotation = template["watermark_rotation"]
+                    if hasattr(self, 'rotation_slider') and hasattr(self, 'rotation_label'):
+                        self.rotation_slider.setValue(self.watermark_rotation)
+                        self.rotation_label.setText(f"{self.watermark_rotation}°")
                         
                 # 加载图片水印设置
                 if "use_image_watermark" in template:
